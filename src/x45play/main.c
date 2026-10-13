@@ -227,11 +227,15 @@ static int play_wav(const char *path, const char *dev, struct out *o)
 				goto out;
 			if (sz > want)
 				fseek(f, (long)(sz - want), SEEK_CUR);
+			if (want < 16 || (rd16(fmt) != 1 && rd16(fmt) != 0xFFFE)) {   /* plain PCM (or its extensible form) only */
+				fprintf(stderr, "x45play: %s: not PCM audio\n", path);
+				goto out;
+			}
 			channels = rd16(fmt + 2);
 			rate = rd32(fmt + 4);
 			bits = rd16(fmt + 14);
 		} else if (!memcmp(ch, "data", 4)) {
-			data_len = (long)sz;
+			data_len = sz > 0x7fffffffu ? 0x7fffffff : (long)sz;   /* long is 32 bits here */
 			break;
 		} else {
 			fseek(f, (long)((sz + 1) & ~1u), SEEK_CUR);
@@ -239,6 +243,10 @@ static int play_wav(const char *path, const char *dev, struct out *o)
 	}
 	if (!channels || !rate || !bits || !data_len) {
 		fprintf(stderr, "x45play: %s: incomplete WAV header\n", path);
+		goto out;
+	}
+	if (bits != 16 && bits != 24 && bits != 32) {   /* the loops below work in whole 2, 3 or 4 byte samples */
+		fprintf(stderr, "x45play: %s: %d bit samples are not supported\n", path, bits);
 		goto out;
 	}
 	printf("source   %s\n", path);

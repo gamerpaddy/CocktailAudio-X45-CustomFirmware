@@ -196,6 +196,8 @@ static int in_row(int input)
 			return i;
 	return 0;
 }
+/* the input a list row stands for (a row number from anywhere else, such as the web bridge, is not trusted) */
+static int in_at(int row) { return in_order[row >= 0 && row < NUM_INPUTS ? row : 0]; }
 static int tuner_input(const struct ui *u) { return u->input == X45_IN_FMRADIO || u->input == UI_IN_DAB; }
 /* Reception as 0..4 bars. FM has a field strength; DAB reports a quality of 0..100 (`tu_sq`), and until the module
  * has sent the first report only whether it decodes (`tu_q`). A DAB lock that is lost caps the bars at one. */
@@ -702,7 +704,7 @@ static void draw_input_countdown(struct ui *u)
 	char buf[48];
 	int w;
 
-	if (!u->in_auto_s || !u->in_t || in_order[u->sel] == u->input)
+	if (!u->in_auto_s || !u->in_t || in_at(u->sel) == u->input)
 		return;
 	if (left < 0)
 		left = 0;
@@ -1319,7 +1321,7 @@ static void spec_read(struct ui *u)
 			nb[i] = (float)strtod(p, &e);
 			if (e == p)
 				return;
-			p = e + 1;
+			p = *e ? e + 1 : e;   /* never past the end of what was read: the file may be cut short */
 		}
 		changed = memcmp(nb, u->sp_b, sizeof nb) != 0;
 		memcpy(u->sp_b, nb, sizeof nb);
@@ -1340,7 +1342,7 @@ static void spec_read(struct ui *u)
 				if (e == p)
 					break;
 				dst[k] = (short)(v < -10000 ? -10000 : v > 10000 ? 10000 : v);
-				p = e + 1;
+				p = *e ? e + 1 : e;
 			}
 			if (k < 200)
 				break;
@@ -1358,7 +1360,7 @@ static void spec_read(struct ui *u)
 				sb[i] = (float)strtod(p, &e);
 				if (e == p)
 					break;
-				p = e + 1;
+				p = *e ? e + 1 : e;
 			}
 			if (i == NSB) {
 				memcpy(u->sp_sb, sb, sizeof sb);
@@ -4757,9 +4759,9 @@ static int net_list(struct ui *u, const char *want, struct mpdc_entry **out)
 	if (discover) {
 		snprintf(cmd, sizeof cmd, "%s discover 2500 2>/dev/null", X45UPNP);
 	} else {
-		const char *bar = strchr(want + 3, '|');
+		const char *bar = strncmp(want, "@u|", 3) ? NULL : strchr(want + 3, '|');
 
-		if (strncmp(want, "@u|", 3) || !bar || (size_t)(bar - want - 3) >= sizeof ctrl) {
+		if (!bar || (size_t)(bar - want - 3) >= sizeof ctrl) {
 			snprintf(u->dir_err, sizeof u->dir_err, "bad network address");
 			return -EINVAL;
 		}
@@ -6825,7 +6827,7 @@ static void on_ok(struct ui *u)
 			enter_screen(u, SCR_PLAYER);
 		}
 	} else if (u->screen == SCR_INPUTS) {
-		input_select(u, in_order[u->sel]);
+		input_select(u, in_at(u->sel));
 	} else if (u->screen == SCR_VISUALS) {
 		visuals_toggle(u, u->sel);
 	} else if (u->screen == SCR_CONFIRM) {
@@ -7397,11 +7399,11 @@ static void input_auto_poll(struct ui *u)
 	static long last_draw;
 	long now = now_ms();
 
-	if (u->screen != SCR_INPUTS || !u->in_auto_s || !u->in_t || in_order[u->sel] == u->input)
+	if (u->screen != SCR_INPUTS || !u->in_auto_s || !u->in_t || in_at(u->sel) == u->input)
 		return;
 	if (now - u->in_t >= IN_AUTO_MS(u)) {
 		u->in_t = 0;
-		input_select(u, in_order[u->sel]);
+		input_select(u, in_at(u->sel));
 		return;
 	}
 	if (now - last_draw >= 60) {         /* animate the countdown strip */
@@ -7662,7 +7664,8 @@ static void web_command(struct ui *u, char *line)
 		if (sscanf(b, "%11s %d", w, &t) == 2 && t)
 			web_event(u, X45_EV_ENCODER, !strcmp(w, "vol") ? X45_KNOB_VOLUME : X45_KNOB_SCROLL, t);
 	} else if (!strcmp(a, "screen")) {
-		if (n >= 0 && n < SCR_COUNT && n != SCR_EXT)
+		/* not the question (SCR_CONFIRM): it would come up with the answer "yes" over whatever it asked last */
+		if (n >= 0 && n < SCR_COUNT && n != SCR_EXT && n != SCR_CONFIRM)
 			enter_screen(u, (enum screen)n);
 	} else if (!strcmp(a, "ext")) {   /* open a screen of ext/ by name */
 		ui_ext_open_name(u, b);

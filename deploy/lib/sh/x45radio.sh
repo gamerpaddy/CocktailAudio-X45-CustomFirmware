@@ -41,6 +41,7 @@ radio_up() {
 	trap 'rmdir $LOCK 2>/dev/null' EXIT
 	if find_dev a69c 8d81 >/dev/null; then
 		rmdir $LOCK 2>/dev/null
+		trap - EXIT   # the lock is let go: a later exit of this script must not remove somebody else's
 		return 0
 	fi
 	if find_dev 1111 1111 >/dev/null; then

@@ -31,6 +31,10 @@ setarch -R $OUT/x45upnp_native browse $CTRL chunked-short >/dev/null 2>$OUT/upnp
 rc=$?
 if [ $rc -le 1 ] && ! grep -q "AddressSanitizer\|runtime error" $OUT/upnp_err.log; then check "a chunk announced but not sent does not read out of bounds (rc $rc)" ok; else check "a chunk announced but not sent does not read out of bounds (rc $rc)" no; cat $OUT/upnp_err.log | head -5; fi
 
+setarch -R $OUT/x45upnp_native browse $CTRL chunked-nul >/dev/null 2>$OUT/upnp_err.log
+rc=$?
+if [ $rc -le 1 ] && ! grep -q "AddressSanitizer\|runtime error" $OUT/upnp_err.log; then check "a chunk full of NUL bytes does not overflow the buffer (rc $rc)" ok; else check "a chunk full of NUL bytes does not overflow the buffer (rc $rc)" no; head -5 $OUT/upnp_err.log; fi
+
 setarch -R $OUT/x45upnp_native browse $CTRL nothing >/dev/null 2>&1
 [ $? -eq 1 ] && check "an HTTP error is a failure, not an empty folder" ok || check "an HTTP error is a failure, not an empty folder" no
 

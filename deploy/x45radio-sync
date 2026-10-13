@@ -28,12 +28,17 @@ browse() {
 }
 
 # entries of a folder, one per line:  container|id|title   or   item|title|url
+# The id stays as the box wrote it (XML-escaped: it goes back into the next request as it is); the title and the
+# address are text, so they are unescaped here (a stream address with "&" in its query is stored with an "&"), and
+# a "|" in a title would break the line, so it becomes "/".
 entries() {
 	browse "$1" | grep -oE '<(container|item) id="[^"]*"|<dc:title>[^<]*|<res [^>]*>[^<]*' | awk '
+		function unesc(s) { gsub(/&lt;/, "<", s); gsub(/&gt;/, ">", s); gsub(/&quot;/, "\"", s); gsub(/&apos;/, "\047", s); gsub(/&amp;/, "\\&", s); return s }
+		function name(s) { s = unesc(s); gsub(/\|/, "/", s); return s }
 		/^<container id=/ { split($0, a, "\""); kind = "container"; id = a[2]; next }
 		/^<item id=/      { kind = "item"; next }
-		/^<dc:title>/     { title = substr($0, 11); if (kind == "container") print "container|" id "|" title; next }
-		/^<res /          { if (kind == "item") { i = index($0, ">"); print "item|" title "|" substr($0, i + 1); kind = "" } }'
+		/^<dc:title>/     { title = name(substr($0, 11)); if (kind == "container") print "container|" id "|" title; next }
+		/^<res /          { if (kind == "item") { i = index($0, ">"); print "item|" title "|" unesc(substr($0, i + 1)); kind = "" } }'
 }
 
 direct() {

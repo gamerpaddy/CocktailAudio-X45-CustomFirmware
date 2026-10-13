@@ -142,6 +142,11 @@ static void ana_init(struct ana *a, unsigned rate, const char *path)
 	a->sinv = malloc(FFT_MAX / 2 * sizeof(float));
 	a->wv[0] = calloc(WAVE_RING, sizeof(float));
 	a->wv[1] = calloc(WAVE_RING, sizeof(float));
+	if (!a->win || !a->ring || !a->sring || !a->mm || !a->ms || !a->re || !a->im || !a->cosv || !a->sinv ||
+	    !a->wv[0] || !a->wv[1]) {
+		fprintf(stderr, "x45loop: out of memory\n");
+		exit(5);
+	}
 	ana_setup(a, rate);
 	a->est_t0 = mono_s();
 }
@@ -357,7 +362,8 @@ static void ana_feed(struct ana *a, const float *s, int frames)
 		a->wv[1][a->wh & (WAVE_RING - 1)] = r;
 		a->wh++;
 	}
-	a->est_frames += frames;
+	if (a->estimate)
+		a->est_frames += frames;
 	t = mono_s();
 	/* The display rate follows the clock, not the sample count: a capture that runs at the
 	 * stream's own rate (44.1 kHz from a PC) would otherwise update only 3 times a second.
@@ -483,6 +489,8 @@ int main(int argc, char **argv)
 			spec = argv[++i];
 	}
 
+	if (rate < 8000 || rate > 384000)   /* the buffers and the band tables are made for rates up to this */
+		rate = 192000;
 	parent = getppid();
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGTERM, on_sig);

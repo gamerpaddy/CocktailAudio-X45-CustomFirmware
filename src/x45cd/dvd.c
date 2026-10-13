@@ -42,15 +42,17 @@ static int ifo_title(const uint8_t *d, size_t len, size_t ptt, size_t pgcit, int
 	for (k = 0; from + 4 * (size_t)(k + 1) <= to && t->nch < DVD_MAXCH; k++) {
 		int pgcn = (int)be16(d + from + 4 * (size_t)k), pgn = (int)be16(d + from + 4 * (size_t)k + 2);
 		size_t srp, p, pm, cp;
+		uint32_t po;
 		int nprog, ncell, entry, next, c, ms = 0;
 		const uint8_t *first, *last;
 
 		if (pgcn < 1 || pgcn > npg || pgcit + 8 + 8 * (size_t)pgcn > len)
 			continue;
 		srp = pgcit + 8 + 8 * (size_t)(pgcn - 1);
-		p = pgcit + be32(d + srp + 4);
-		if (p + 0xEC > len)
+		po = be32(d + srp + 4);
+		if (po > len || pgcit + po + 0xEC > len)   /* no sum of a disc's number and a size that can wrap */
 			continue;
+		p = pgcit + po;
 		nprog = d[p + 2];
 		ncell = d[p + 3];
 		pm = p + be16(d + p + 0xE6);
@@ -586,12 +588,12 @@ int dvd_pcm_sector(struct dvd_pcm *p, const uint8_t *s, int32_t *out, int cap)
 
 		if (end > DVD_SECTOR)
 			end = DVD_SECTOR;
-		if (id == 0xBD && len > 9 && p->fmt == 0) {
+		if (id == 0xBD && len > 9 && pos + 9 <= DVD_SECTOR && p->fmt == 0) {
 			int d0 = pos + 9 + s[pos + 8];
 
 			if (d0 + 4 <= end && s[d0] == p->sub)
 				ac3_feed(p, s + d0, end - d0);
-		} else if (id == 0xBD && len > 9) {
+		} else if (id == 0xBD && len > 9 && pos + 9 <= DVD_SECTOR) {
 			int d0 = pos + 9 + s[pos + 8];      /* the byte after the PES header: the substream */
 
 			if (d0 + 7 <= end && s[d0] == p->sub) {

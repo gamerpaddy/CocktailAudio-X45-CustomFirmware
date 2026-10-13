@@ -405,8 +405,10 @@ static struct ttf_glyph *ttf_glyph(int c, int scale)
 	float sf;
 	int adv, lsb, x0, y0, x1, y1;
 
-	if (c < 32 || c > 126 || scale < 1 || scale > 9)
+	if (c < 32 || c > 126)
 		c = '?';
+	if (scale < 1 || scale > 9)
+		scale = 1;   /* the callers keep to 1..9; the table must not be indexed by anything else */
 	gl = &ttf_cache[c][scale];
 	if (gl->have)
 		return gl;

@@ -161,7 +161,8 @@ static char *http(const char *method, const char *url, const char *soapaction, c
 	b = he + 4;
 	hdr[0] = '\0';
 	if (strcasestr(buf, "transfer-encoding: chunked") && strcasestr(buf, "transfer-encoding: chunked") < he) {
-		char *out = malloc(strlen(b) + 1), *o = out, *p = b;
+		/* sized by what was received, not by strlen: a NUL inside the body would make that too small */
+		char *out = malloc((size_t)(buf + len - b) + 1), *o = out, *p = b;
 
 		if (!out) {
 			free(buf);

@@ -50,7 +50,8 @@ sata_enable() {
 	for b in /sys/block/sd*; do
 		[ -e "$b" ] && readlink -f "$b" | grep -q '/ata[0-9]' && return
 	done
-	[ "$(cat /sys/module/ahci_imx/parameters/hotplug 2>/dev/null)" = "Y" ] && return
+	# the parameter reads "1" on this kernel, "Y" on others
+	case "$(cat /sys/module/ahci_imx/parameters/hotplug 2>/dev/null)" in Y|y|1) return ;; esac
 	echo 1 > /sys/module/ahci_imx/parameters/hotplug 2>/dev/null || return
 	echo 2200000.sata > /sys/bus/platform/drivers/ahci-imx/unbind 2>/dev/null
 	echo 2200000.sata > /sys/bus/platform/drivers/ahci-imx/bind 2>/dev/null
@@ -68,9 +69,9 @@ mount_one() {
 	label=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
 	if [ -z "$label" ]; then
 		# no label: the vendor firmware called such a disk HDD4, the next one HDD5 ... keep the names stable
-		n=4
-		while grep -q " /mnt/HDD$n " /proc/mounts; do n=$((n + 1)); done
-		label=HDD$n
+		hn=4   # not n: the caller's loop counts with n, and a failed mount is remembered under it
+		while grep -q " /mnt/HDD$hn " /proc/mounts; do hn=$((hn + 1)); done
+		label=HDD$hn
 	fi
 	name=$(clean "$label")
 	[ -z "$name" ] && name=$base

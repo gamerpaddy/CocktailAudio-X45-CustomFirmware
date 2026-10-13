@@ -280,6 +280,33 @@ static int resolve(const struct root *roots, int nroots, const char *user, int m
 	return 0;
 }
 
+/* Like resolve() for something that exists, but a link in the last place stands for itself and not for what it points to:
+ * deleting, renaming or moving a link must not touch its target (a link into another disk would delete that disk's folder).
+ * A link that points nowhere, or out of the storage, can be removed like any other entry. */
+static int resolve_entry(const struct root *roots, int nroots, const char *user, char *out, const struct root **rootp)
+{
+	char dir[PATH_MAX], real[PATH_MAX], ent[PATH_MAX], *b;
+	const struct root *rt;
+	struct stat st;
+
+	if (user[0] == '/' && strlen(user) < PATH_MAX - 2) {
+		snprintf(dir, sizeof dir, "%s", user);
+		b = strrchr(dir, '/');
+		if (b && valid_name(b + 1)) {
+			*b++ = '\0';
+			if (realpath(dir[0] ? dir : "/", real) &&
+			    snprintf(ent, sizeof ent, "%s/%s", strcmp(real, "/") ? real : "", b) < (int)sizeof ent &&
+			    lstat(ent, &st) == 0 && S_ISLNK(st.st_mode) && (rt = root_of(roots, nroots, ent))) {
+				snprintf(out, PATH_MAX, "%s", ent);
+				if (rootp)
+					*rootp = rt;
+				return 0;
+			}
+		}
+	}
+	return resolve(roots, nroots, user, 1, out, rootp);
+}
+
 static int is_root_path(const struct root *roots, int nroots, const char *real)
 {
 	int i;
@@ -1085,7 +1112,10 @@ static void ep_op(int fd, const struct root *roots, int nroots, const char *quer
 
 		if (!qget(query, "p", i, p, sizeof p))
 			break;
-		rc = resolve(roots, nroots, p, strcmp(cmd, "mkdir") != 0, src[np], &srt[np]);
+		if (!strcmp(cmd, "mkdir") || !strcmp(cmd, "copy"))
+			rc = resolve(roots, nroots, p, strcmp(cmd, "mkdir") != 0, src[np], &srt[np]);
+		else
+			rc = resolve_entry(roots, nroots, p, src[np], &srt[np]);
 		if (rc == -EACCES) {
 			json_msg(fd, 403, "outside the storage");
 			goto out;

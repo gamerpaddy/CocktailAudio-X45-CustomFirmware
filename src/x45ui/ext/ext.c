@@ -245,6 +245,11 @@ int ext_para(struct ui *u, int x, int y, int w, const char *text, int scale, uin
 	while (*p) {
 		int len = 0, last_sp = -1;
 
+		if (*p == '\n') {   /* an empty line: nothing to draw, and no stale text in `line` */
+			y += lh;
+			p++;
+			continue;
+		}
 		/* the longest run of words that fits */
 		while (p[len] && p[len] != '\n' && len < (int)sizeof line - 1) {
 			line[len] = p[len];

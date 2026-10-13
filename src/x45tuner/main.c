@@ -160,6 +160,19 @@ static void mot_reset(void)
 	T.dirty = 1;
 }
 
+/* every segment 0..last is there (a stray one past the last must not stand in for a missing one) */
+static int mot_complete(const struct mot_obj *m)
+{
+	int i;
+
+	if (m->last < 0 || m->got < m->last + 1)
+		return 0;
+	for (i = 0; i <= m->last; i++)
+		if (!m->seg[i].d)
+			return 0;
+	return 1;
+}
+
 static void mot_finish(struct mot_obj *m)
 {
 	FILE *f = fopen(SLIDE_FILE ".tmp", "wb");
@@ -227,7 +240,7 @@ static void mot_frame(const uint8_t *p, int n)
 	}
 	if (p[3] & 0x80)
 		m->last = idx;
-	if (m->last >= 0 && m->got == m->last + 1)
+	if (mot_complete(m))
 		mot_finish(m);
 }
 
@@ -896,14 +909,15 @@ int main(int argc, char **argv)
 			reset_done = 1;
 		}
 		for (tries = 0; tries < 3 && !g_stop; tries++) {
-			long t0 = now_ms(), last_init = -10000, budget = (tries == 0 && !reset_done) ? 1500 : 8000;
-			int up = 0;
+			long t0 = now_ms(), last_init = 0, budget = (tries == 0 && !reset_done) ? 1500 : 8000;
+			int up = 0, sent = 0;   /* (a time stands for "never" in no 32-bit value: now_ms() takes all of them) */
 
 			while (now_ms() - t0 < budget && !up && !g_stop) {
 				struct pollfd p = { T.fd, POLLIN, 0 };
 
-				if (now_ms() - last_init >= 1500) {
+				if (!sent || ms_diff(now_ms(), last_init) >= 1500) {
 					module_init();
+					sent = 1;
 					last_init = now_ms();
 				}
 				if (poll(&p, 1, 100) > 0)

@@ -125,7 +125,7 @@ static int read_toc(int fd, struct toc *t)
 
 	if (ioctl(fd, CDROMREADTOCHDR, &h) < 0)
 		return -errno;
-	if (h.last >= MAXTRK)
+	if (h.last >= MAXTRK || h.first > h.last)   /* a table of contents with no tracks has no lead-out to read */
 		return -EINVAL;
 	t->first = h.first;
 	t->last = h.last;

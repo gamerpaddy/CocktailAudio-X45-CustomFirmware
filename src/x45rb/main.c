@@ -42,7 +42,7 @@ static char *fetch(const char *path_query, size_t *len)
 	for (s = 0; s < sizeof servers / sizeof *servers; s++) {
 		FILE *p;
 
-		snprintf(cmd, sizeof cmd, "curl -s -f -m 12 --cacert " CA " -A x45/1.0 'https://%s.api.radio-browser.info%s' 2>/dev/null",
+		snprintf(cmd, sizeof cmd, "curl -s -f -m 12 --max-filesize 4194304 --cacert " CA " -A x45/1.0 'https://%s.api.radio-browser.info%s' 2>/dev/null",
 			 servers[s], path_query);
 		p = popen(cmd, "r");
 		if (!p)
@@ -52,7 +52,7 @@ static char *fetch(const char *path_query, size_t *len)
 			size_t r;
 
 			if (n + 8192 + 1 > cap) {
-				char *nb = realloc(buf, cap * 2);
+				char *nb = cap >= (8u << 20) ? NULL : realloc(buf, cap * 2);   /* no answer of the directory is this big */
 
 				if (!nb) {
 					pclose(p);
@@ -266,6 +266,13 @@ static int emit(const char *json, int kind, const char *cmd)
 	while (*p == '{' && n < 256) {
 		p = read_obj(p, &o);
 		clean(o.name);
+		clean(o.url);   /* nothing a server sends may carry a tab or a line break into the lines this tool prints */
+		clean(o.url_resolved);
+		clean(o.countrycode);
+		clean(o.codec);
+		clean(o.iso);
+		clean(o.bitrate);
+		clean(o.count);
 		if (kind == 'S') {
 			const char *u = o.url_resolved[0] ? o.url_resolved : o.url;
 

@@ -5,6 +5,7 @@ POST /cd with an ObjectID in the SOAP body:
   "root"            -> one folder whose id contains an ampersand, one track, TotalMatches 300
   "Simon & Garfunkel" (sent as &amp;) -> the folder was asked for with its id escaped: one track
   "chunked-short"   -> a chunked reply whose last chunk claims more bytes than it carries
+  "chunked-nul"     -> a chunked reply whose only chunk is made of NUL bytes
   anything else     -> 500
 It records every ObjectID it received, as text, in the file given as argv[2].
 """
@@ -60,6 +61,16 @@ class H(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"%x\r\n" % 20 + data[:20] + b"\r\n")
             self.wfile.write(b"ffff\r\n" + data[20:60])   # announces 65535 bytes, sends 40, then hangs up
+            self.wfile.flush()
+            self.close_connection = True
+            return
+        elif oid == "chunked-nul":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/xml")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"28\r\n" + b"\0" * 40 + b"\r\n0\r\n\r\n")   # a chunk made of NUL bytes
             self.wfile.flush()
             self.close_connection = True
             return

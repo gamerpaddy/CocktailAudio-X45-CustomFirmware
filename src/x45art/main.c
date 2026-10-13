@@ -529,8 +529,12 @@ static int rb_get(const char *path_query, char **body, size_t *len)
 
 	for (s = 0; s < sizeof rb_servers / sizeof *rb_servers; s++) {
 		snprintf(url, sizeof url, "https://%s.api.radio-browser.info%s", rb_servers[s], path_query);
-		if (fetch_mem(url, body, len, 1 << 20) == 0 && *len > 1)
-			return 0;
+		if (fetch_mem(url, body, len, 1 << 20) == 0) {
+			if (*len > 1)
+				return 0;
+			free(*body);   /* an empty answer: the next server may know better */
+			*body = NULL;
+		}
 	}
 	return -1;
 }
@@ -680,7 +684,7 @@ static int mpd_picture(struct rd *r, const char *cmd, const char *uri, const cha
 
 		snprintf(req, sizeof req, "%s \"%s\" %zu\n", cmd, q, off);
 		if (send_all(r->fd, req) < 0)
-			goto done;
+			goto fail;   /* could not ask: not the same as "MPD has none" */
 		for (;;) {
 			if (rd_line(r, line, sizeof line) < 0)
 				goto fail;
@@ -788,6 +792,8 @@ static void prune(const char *out)
 		return;
 	memcpy(dir, out, (size_t)(slash - out));
 	dir[slash - out] = '\0';
+	if (!strstr(dir, "x45art"))
+		return;   /* only ever tidies a folder made for these pictures, whatever OUT was given as */
 	d = opendir(dir);
 	if (!d)
 		return;

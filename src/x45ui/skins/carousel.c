@@ -125,7 +125,7 @@ static void list_wheel(struct ui *u, struct ui_list *l)
 	static const int fade[WHEEL_REACH + 1] = { 0, 0, 30, 50, 65 };   /* percent towards the background */
 	const int wrap = l->n >= 2 * WHEEL_REACH + 1;
 	struct ui_item it;
-	char pos[24];
+	char pos[32];
 	int k, y, has_val;
 
 	if (l->n == 0) {
@@ -201,7 +201,7 @@ static void list_settings(struct ui *u, struct ui_list *l)
 	const int cx = s->w / 2, cw = 760, x0 = cx - cw / 2, x1 = cx + cw / 2;
 	const int dy[4] = { 0, 78, 128, 170 };   /* distance of the rows from the cursor's, in px */
 	int k, side;
-	char pos[24];
+	char pos[32];
 
 	if (l->n == 0) {
 		skin_list_msg(u, l, 0, 250, 1);

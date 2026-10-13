@@ -289,8 +289,10 @@ static void web_parse(void)
 	int failed = 0;
 
 	nweb = 0;
-	if (!wbuf)
+	if (!wbuf) {   /* the tool printed nothing (it is missing, or died at once): that is an answer too */
+		wstate = W_FAIL;
 		return;
+	}
 	wbuf[wlen] = '\0';
 	for (; line && *line; line = end ? end + 1 : NULL) {
 		char *url, *name, *tail;
@@ -305,7 +307,7 @@ static void web_parse(void)
 			continue;
 		url = line + 2;
 		name = strchr(url, '\t');
-		if (!name)
+		if (!name || (size_t)(name - url) >= sizeof web[0].url)   /* an address cut short would play something else */
 			continue;
 		*name++ = '\0';
 		h = &web[nweb];

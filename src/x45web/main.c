@@ -591,7 +591,9 @@ static int rmtree(const char *path, int depth)
 	while ((e = readdir(d))) {
 		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
 			continue;
-		snprintf(sub, sizeof sub, "%s/%s", path, e->d_name);
+		/* a cut-short name could be another, existing path: never delete by one */
+		if ((size_t)snprintf(sub, sizeof sub, "%s/%s", path, e->d_name) >= sizeof sub)
+			continue;
 		rmtree(sub, depth + 1);
 	}
 	closedir(d);
@@ -1085,9 +1087,11 @@ static void serve(int fd)
 	}
 }
 
+#define MAX_KIDS 40   /* connections served at once (a page opens about 6; streams and uploads stay for long) */
+
 int main(int argc, char **argv)
 {
-	int port = 80, ls, one = 1, i;
+	int port = 80, ls, one = 1, i, kids = 0;
 	struct sockaddr_in a;
 
 	for (i = 1; i < argc; i++) {
@@ -1097,7 +1101,6 @@ int main(int argc, char **argv)
 			webdir = argv[++i];
 	}
 	signal(SIGPIPE, SIG_IGN);
-	signal(SIGCHLD, SIG_IGN);
 	ls = socket(AF_INET, SOCK_STREAM, 0);
 	if (ls < 0) {
 		perror("socket");
@@ -1122,14 +1125,24 @@ int main(int argc, char **argv)
 			usleep(100000);
 			continue;
 		}
+		/* one process per connection; the finished ones are collected here, and a flood of connections gets a plain
+		 * refusal instead of using up the memory (a stalled sender is dropped after 5 s) */
+		while (waitpid(-1, NULL, WNOHANG) > 0)
+			kids--;
+		if (kids >= MAX_KIDS) {
+			respond_text(c, 503, "busy");
+			close(c);
+			continue;
+		}
 		pid = fork();
 		if (pid == 0) {
 			close(ls);
-			signal(SIGCHLD, SIG_DFL);   /* system() needs to wait for its child; the parent reaps ours */
 			serve(c);
 			close(c);
 			_exit(0);
 		}
+		if (pid > 0)
+			kids++;
 		close(c);
 	}
 }
