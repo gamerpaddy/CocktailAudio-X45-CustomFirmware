@@ -1,0 +1,27 @@
+#!/bin/sh
+# librespot --onevent hook (Spotify Connect). Runs asynchronously, but
+# session_connected fires when the Spotify app picks this device, before any audio
+# is opened, so the DAC is handed over there exactly as for AirPlay: MPD stops, the
+# XMOS clock goes to the 44.1k family. The AirPlay marker is shared on purpose, so
+# the panel and the arbiter treat both as "an external session owns the DAC".
+ROOT=/home/root/x45new
+CARD=/proc/asound/card3/pcm0p/sub0/status
+
+case "$PLAYER_EVENT" in
+session_connected)
+	: > /tmp/x45-airplay-active
+	pkill -x shairport-sync 2>/dev/null
+	"$ROOT/bin/x45mpc" stop >/dev/null 2>&1
+	n=0
+	while [ $n -lt 50 ]; do
+		grep -q closed "$CARD" 2>/dev/null && break
+		sleep 0.1 2>/dev/null || sleep 1
+		n=$((n + 1))
+	done
+	"$ROOT/bin/x45ctl" clock 44100 >/dev/null 2>&1
+	;;
+session_disconnected)
+	rm -f /tmp/x45-airplay-active
+	;;
+esac
+exit 0

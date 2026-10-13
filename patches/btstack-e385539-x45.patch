@@ -1,0 +1,352 @@
+diff --git a/example/Makefile.inc b/example/Makefile.inc
+index 1e168de..57ff1b0 100644
+--- a/example/Makefile.inc
++++ b/example/Makefile.inc
+@@ -498,6 +498,9 @@ a2dp_source_demo: ${CORE_OBJ} ${COMMON_OBJ} ${CLASSIC_OBJ} ${SDP_CLIENT} ${SBC_C
+ a2dp_sink_demo: ${CORE_OBJ} ${COMMON_OBJ} ${CLASSIC_OBJ} ${SDP_CLIENT} ${SBC_CODEC_OBJ} ${AVDTP_OBJ} avrcp.o avrcp_controller.o avrcp_target.o avrcp_cover_art_client.o  obex_srm_client.o goep_client.o obex_parser.o obex_message_builder.o btstack_resample.o btstack_sample_rate_compensation.o a2dp_sink_demo.c
+ 	${CC} $^ ${CFLAGS} ${LDFLAGS} -o $@
+ 
++x45bt: ${CORE_OBJ} ${COMMON_OBJ} ${CLASSIC_OBJ} ${SDP_CLIENT} ${SBC_CODEC_OBJ} ${AVDTP_OBJ} avrcp.o avrcp_controller.o avrcp_target.o avrcp_cover_art_client.o  obex_srm_client.o goep_client.o obex_parser.o obex_message_builder.o btstack_resample.o btstack_sample_rate_compensation.o x45bt.c
++	${CC} $^ ${CFLAGS} ${LDFLAGS} -o $@
++
+ avrcp_browsing_client: ${CORE_OBJ} ${COMMON_OBJ} ${CLASSIC_OBJ} ${SDP_CLIENT} ${AVRCP_OBJ} ${AVDTP_OBJ} avrcp_browsing_client.c
+ 	${CC} $^ ${CFLAGS} ${LDFLAGS} -o $@
+ 
+diff --git a/example/a2dp_sink_demo.c b/example/a2dp_sink_demo.c
+index 214cb15..afa437f 100644
+--- a/example/a2dp_sink_demo.c
++++ b/example/a2dp_sink_demo.c
+@@ -85,7 +85,7 @@
+ 
+ #ifdef HAVE_POSIX_FILE_IO
+ #include "wav_util.h"
+-#define STORE_TO_WAV_FILE
++/* x45: no wav dump (fills the tmpfs) */
+ #ifdef _MSC_VER
+ // ignore deprecated warning for fopen
+ #pragma warning(disable : 4996)
+@@ -594,7 +594,7 @@ static void handle_l2cap_media_data_packet(uint8_t seid, uint8_t *packet, uint16
+ 
+     // nominal factor (fixed-point 2^16) and compensation offset
+     uint32_t nominal_factor = 0x10000;
+-    uint32_t compensation   = 0x00100;
++    uint32_t compensation   = 0x00010;   /* x45: was 0x100 (0.4%), audible as crackle; real drift is ~100 ppm */
+ 
+     if (sbc_frames_in_buffer < OPTIMAL_FRAMES_MIN){
+     	resampling_factor = nominal_factor - compensation;    // stretch samples
+diff --git a/platform/libusb/hci_transport_h2_libusb.c b/platform/libusb/hci_transport_h2_libusb.c
+index 5816223..9858fef 100644
+--- a/platform/libusb/hci_transport_h2_libusb.c
++++ b/platform/libusb/hci_transport_h2_libusb.c
+@@ -852,8 +852,11 @@ static int prepare_device(libusb_device_handle * aHandle){
+ #endif
+ 
+     const int configuration = 1;
+-    log_info("setting configuration %d...", configuration);
++#ifdef X45_NO_USB_RESET
++    r = 0;   // x45: the stick is already configured; re-setting it makes the AIC firmware drop off the bus
++#else
+     r = libusb_set_configuration(aHandle, configuration);
++#endif
+     if (r < 0) {
+         log_error("Error libusb_set_configuration: %d", r);
+         if (kernel_driver_detached){
+@@ -920,7 +923,7 @@ static libusb_device_handle * try_open_device(libusb_device * device){
+     log_info("libusb open %d, handle %p", r, dev_handle);
+ 
+     // reset device (Not currently possible under FreeBSD 11.x/12.x due to usb framework)
+-#if !defined(__FreeBSD__)
++#if !defined(__FreeBSD__) && !defined(X45_NO_USB_RESET)
+     r = libusb_reset_device(dev_handle);
+     if (r < 0) {
+         log_error("libusb_reset_device failed!");
+diff --git a/platform/linux/btstack_audio_alsa.c b/platform/linux/btstack_audio_alsa.c
+index 07e7f94..ceecdaa 100644
+--- a/platform/linux/btstack_audio_alsa.c
++++ b/platform/linux/btstack_audio_alsa.c
+@@ -43,11 +43,14 @@
+ #include <stdint.h>
+ #include <string.h>
+ #include <poll.h>
++#include <unistd.h>
++#include <time.h>
++#include "../../../../../src/libx45/x45clock.c"
+ 
+ #include "btstack_debug.h"
+ #include "btstack_audio.h"
+ 
+-static const char* device = "default";
++static const char* device = "hw:CocktailAudio,0";
+ static const char* simple_mixer_name = "Master";
+ static snd_pcm_t *pcm_handle = NULL;
+ static snd_mixer_t *mixer_handle = NULL;
+@@ -123,10 +126,32 @@ static void btstack_audio_alsa_handler(btstack_data_source_t * ds, btstack_data_
+         return;
+     }
+ 
++    {	/* x45: the XMOS clock-family line gets flipped back while playing, keep re-asserting it */
++        static struct timespec last;
++        struct timespec now;
++        clock_gettime(CLOCK_MONOTONIC, &now);
++        if ((now.tv_sec - last.tv_sec) * 1000 + (now.tv_nsec - last.tv_nsec) / 1000000 >= 300) {
++            last = now;
++            x45_clock_select(current_sample_rate);
++        }
++    }
+     int16_t buffer[1024] = { 0 };
+     playback_callback( buffer, 512, NULL );
++    {	/* x45 debug: dump the first ~12 s of what we play when /tmp/x45bt-dump exists */
++        static FILE *dump; static long dumped;
++        if (!dump && dumped == 0 && access("/tmp/x45bt-dump", F_OK) == 0) dump = fopen("/tmp/x45bt.raw", "wb");
++        if (dump) {
++            fwrite(buffer, 4, 512, dump);
++            if ((dumped += 512) > 44100 * 12) { fclose(dump); dump = NULL; }
++        }
++    }
+     err = snd_pcm_writei( pcm_handle, buffer, 512 );
+     if (err < 512) {
++        if (err == -EPIPE || err == -EBADFD) {
++            snd_pcm_prepare(pcm_handle);
++            snd_pcm_writei(pcm_handle, buffer, 512);
++            return;
++        }
+         fprintf(stderr, "Write error: %s\n", snd_strerror(err));
+         return;
+     }
+@@ -191,6 +216,7 @@ static int alsa_init(uint8_t channels, uint32_t samplerate, void (*playback)(int
+         return err;
+     }
+ 
++    x45_clock_select(samplerate);	/* before the PCM is opened */
+     err = snd_pcm_open(&pcm_handle, device, SND_PCM_STREAM_PLAYBACK, 0);
+     if(err < 0) {
+         fprintf(stderr, "Cannot open audio device: %s\n", snd_strerror(err));
+@@ -359,9 +385,7 @@ static int alsa_init(uint8_t channels, uint32_t samplerate, void (*playback)(int
+     }
+ 
+     // TODO: remove once pipe error handling / priming is implemented
+-    int16_t samples[48000] = { 0 };
+     printf("period size: %ld\n", period_size );
+-    snd_pcm_writei( pcm_handle, samples, period_size );
+ 
+     alsa_mixer_init();
+     return 0;
+@@ -386,26 +410,46 @@ static void alsa_set_volume(uint8_t volume) {
+ }
+ 
+ static void alsa_start_stream(void) {
+-    snd_pcm_start(pcm_handle);
++    static int16_t silence[48000];
++    if (pcm_handle == NULL) return;
++    snd_pcm_prepare(pcm_handle);
++    snd_pcm_writei(pcm_handle, silence, period_size);	/* prime */
++    if (snd_pcm_state(pcm_handle) == SND_PCM_STATE_PREPARED)
++        snd_pcm_start(pcm_handle);	/* start threshold is higher than one period */
+ }
+ 
+ static void alsa_stop_stream(void) {
+-    snd_pcm_drop(pcm_handle);
++    if (pcm_handle != NULL) snd_pcm_drop(pcm_handle);
+ }
+ 
+ static void alsa_close(void) {
++    /* x45: the data sources must leave the run loop before their descriptors are closed and their
++     * memory freed. Left in, poll() reports the dead descriptors at once, forever: the process spun
++     * at 100 % of a core after the first phone disconnect, and the list held freed memory. */
++    if( btstack_audio_alsa_data_sources != NULL ) {
++        for(int i=0; i<ufds_count; ++i) {
++            btstack_run_loop_disable_data_source_callbacks(&btstack_audio_alsa_data_sources[i], DATA_SOURCE_CALLBACK_READ | DATA_SOURCE_CALLBACK_WRITE);
++            btstack_run_loop_remove_data_source(&btstack_audio_alsa_data_sources[i]);
++        }
++    }
+     if( pcm_handle != NULL ) {
+         snd_pcm_close(pcm_handle);
++        pcm_handle = NULL;
+     }
+     if( mixer_handle != NULL ) {
+         snd_mixer_close(mixer_handle);
++        mixer_handle = NULL;
++        master_volume = NULL;
+     }
+     if( ufds != NULL ) {
+         free( ufds );
++        ufds = NULL;
+     }
+     if( btstack_audio_alsa_data_sources != NULL ) {
+         free( btstack_audio_alsa_data_sources );
++        btstack_audio_alsa_data_sources = NULL;
+     }
++    ufds_count = 0;
+ }
+ 
+ btstack_audio_sink_t btstack_audio_alsa_sink = {
+diff --git a/platform/posix/btstack_stdin_posix.c b/platform/posix/btstack_stdin_posix.c
+index 6cd9dba..f9ee40a 100644
+--- a/platform/posix/btstack_stdin_posix.c
++++ b/platform/posix/btstack_stdin_posix.c
+@@ -57,6 +57,12 @@ static void stdin_process(btstack_data_source_t *ds, btstack_data_source_callbac
+ 
+     char data;
+     ssize_t result = read(stdin_source.source.fd, &data, 1);
++    if (result == 0){
++        // x45: end of input (the panel software closed the pipe): stop polling, tell the app once (^D)
++        btstack_run_loop_remove_data_source(&stdin_source);
++        if (stdin_handler) (*stdin_handler)(4);
++        return;
++    }
+     if (result < 1) return;
+     if (stdin_handler == NULL) return;
+ 
+diff --git a/port/libusb/Makefile b/port/libusb/Makefile
+index e257d17..9dee95a 100644
+--- a/port/libusb/Makefile
++++ b/port/libusb/Makefile
+@@ -4,11 +4,11 @@ BTSTACK_ROOT ?= ../..
+ CORE += main.c btstack_stdin_posix.c btstack_tlv_posix.c hci_dump_posix_fs.c
+ 
+ COMMON += hci_transport_h2_libusb.c btstack_run_loop_posix.c le_device_db_tlv.c btstack_link_key_db_tlv.c wav_util.c btstack_network_posix.c
+-COMMON += btstack_audio_portaudio.c btstack_chipset_zephyr.c btstack_chipset_realtek.c rijndael.c btstack_signal.c
++COMMON += btstack_audio_alsa.c btstack_audio_portaudio.c btstack_chipset_zephyr.c btstack_chipset_realtek.c rijndael.c btstack_signal.c
+ 
+ include ${BTSTACK_ROOT}/example/Makefile.inc
+ 
+-CFLAGS  += -g -std=c99 -Wall -Wmissing-prototypes -Wstrict-prototypes -Wshadow -Wunused-parameter -Wredundant-decls -Wsign-compare -Wswitch-default
++CFLAGS  += -g -std=gnu99 -Wall -Wmissing-prototypes -Wstrict-prototypes -Wshadow -Wunused-parameter -Wredundant-decls -Wsign-compare -Wswitch-default
+ # CFLAGS += -Werror
+ # CFLAGS += -pedantic
+ 
+@@ -58,3 +58,8 @@ clean_src:
+ 
+ all: ${EXAMPLES}
+ 
++
++# x45: ALSA output to the XMOS, static ARM build
++VPATH += ${BTSTACK_ROOT}/platform/linux
++CFLAGS += -DHAVE_ALSA
++LDFLAGS += -lasound
+diff --git a/port/libusb/main.c b/port/libusb/main.c
+index 5d05ed9..4d0438a 100644
+--- a/port/libusb/main.c
++++ b/port/libusb/main.c
+@@ -162,7 +162,7 @@ static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *pack
+                     if (using_static_address){
+                         memcpy(local_addr, static_address, 6);
+                     }
+-                    btstack_strcpy(tlv_db_path, sizeof(tlv_db_path), TLV_DB_PATH_PREFIX);
++                    btstack_strcpy(tlv_db_path, sizeof(tlv_db_path), getenv("X45BT_TLV_DIR") ? getenv("X45BT_TLV_DIR") : TLV_DB_PATH_PREFIX);
+                     btstack_strcat(tlv_db_path, sizeof(tlv_db_path), bd_addr_to_str_with_delimiter(local_addr, '-'));
+                     btstack_strcat(tlv_db_path, sizeof(tlv_db_path), TLV_DB_PATH_POSTFIX);
+                     printf("TLV path: %s", tlv_db_path);
+@@ -221,11 +221,22 @@ static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *pack
+     }
+ }
+ 
++static void power_off_now(void){
++    shutdown_triggered = true;
++    hci_power_control(HCI_POWER_OFF);
++}
++
++// x45: the application may need to quiet the controller before the stack lets go of it
++extern void x45bt_prepare_shutdown(void (*done)(void)) __attribute__((weak));
++
+ static void trigger_shutdown(void){
+     printf("CTRL-C - SIGINT received, shutting down..\n");
+     log_info("sigint_handler: shutting down");
+-    shutdown_triggered = true;
+-    hci_power_control(HCI_POWER_OFF);
++    if (x45bt_prepare_shutdown){
++        x45bt_prepare_shutdown(&power_off_now);
++        return;
++    }
++    power_off_now();
+ }
+ 
+ static int led_state = 0;
+@@ -270,6 +281,10 @@ static void usage(const char *name){
+ 
+ #define USB_MAX_PATH_LEN 7
+ int main(int argc, const char * argv[]){
++    // x45: a shell starts background jobs with SIGINT ignored, and an ignored SIGINT never reaches sigwait()
++    signal(SIGINT, SIG_DFL);
++    setvbuf(stdout, NULL, _IOLBF, 0);
++    hci_transport_usb_add_device(0xa69c, 0x8d81);   // AIC8800D80 after firmware load
+ 
+     uint8_t usb_path[USB_MAX_PATH_LEN];
+     uint8_t usb_bus = 0;
+@@ -352,17 +367,20 @@ int main(int argc, const char * argv[]){
+         log_file_path = pklg_path;
+     }
+ 
+-    hci_dump_posix_fs_open(log_file_path, HCI_DUMP_PACKETLOGGER);
+-    const hci_dump_t * hci_dump_impl = hci_dump_posix_fs_get_instance();
+-    hci_dump_init(hci_dump_impl);
+-    printf("Packet Log: %s\n", log_file_path);
++    // x45: a packet log of a streaming session is megabytes a minute; only on request
++    if (getenv("X45BT_DUMP")){
++        hci_dump_posix_fs_open(log_file_path, HCI_DUMP_PACKETLOGGER);
++        const hci_dump_t * hci_dump_impl = hci_dump_posix_fs_get_instance();
++        hci_dump_init(hci_dump_impl);
++        printf("Packet Log: %s\n", log_file_path);
++    }
+ 
+     // init HCI
+ 	hci_init(hci_transport_usb_instance(), NULL);
+ 
+-#ifdef HAVE_PORTAUDIO
+-    btstack_audio_sink_set_instance(btstack_audio_portaudio_sink_get_instance());
+-    btstack_audio_source_set_instance(btstack_audio_portaudio_source_get_instance());
++#ifdef HAVE_ALSA
++    btstack_audio_sink_set_instance(btstack_audio_alsa_sink_get_instance());
++    // no audio source (headless x45)
+ #endif
+ 
+     // inform about BTstack state
+@@ -382,6 +400,9 @@ int main(int argc, const char * argv[]){
+         hci_transport_usb_add_device(vendor_id, product_id);
+     }
+ 
++    // x45: no EDR packets, the stick never gets acks for them
++    hci_enable_acl_packet_types(0xcc18);
++
+     // setup app
+     btstack_main(argc, argv);
+ 
+diff --git a/src/hci.c b/src/hci.c
+index 5bf52b0..48637dc 100644
+--- a/src/hci.c
++++ b/src/hci.c
+@@ -4754,6 +4754,7 @@ static void event_handler(uint8_t *packet, uint16_t size){
+                 if (hci_event_connection_complete_get_status(packet) == ERROR_CODE_SUCCESS){
+                     conn->state = OPEN;
+                     conn->con_handle = little_endian_read_16(packet, 3);
++                    conn->x45_ptype_pending = 1;
+ 
+                     // trigger write supervision timeout if we're master
+                     if ((hci_stack->link_supervision_timeout != HCI_LINK_SUPERVISION_TIMEOUT_DEFAULT) && (conn->role == HCI_ROLE_MASTER)){
+@@ -8109,6 +8110,12 @@ static bool hci_run_general_pending_commands(void){
+         if (connection->state == SENT_DISCONNECT) continue;
+ 
+ #ifdef ENABLE_CLASSIC
++        // x45: the stick never gets baseband acks for EDR packets, force BR packets only
++        if (connection->x45_ptype_pending && connection->address_type == BD_ADDR_TYPE_ACL && connection->state == OPEN){
++            connection->x45_ptype_pending = 0;
++            hci_send_cmd(&hci_change_connection_packet_type, connection->con_handle, 0xff1e);
++            return true;
++        }
+ 
+         // Handling link key request requires remote supported features
+         if (((connection->authentication_flags & AUTH_FLAG_HANDLE_LINK_KEY_REQUEST) != 0)){
+diff --git a/src/hci.h b/src/hci.h
+index dc16799..4d79a4c 100644
+--- a/src/hci.h
++++ b/src/hci.h
+@@ -771,6 +771,9 @@ typedef struct {
+     const uint8_t * classic_oob_r_256;
+ #endif
+ 
++    // x45: restrict ACL packet types (no EDR) after the link opens
++    uint8_t x45_ptype_pending;
++
+ } hci_connection_t;
+ 
+ typedef enum {

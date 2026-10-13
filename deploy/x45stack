@@ -1,0 +1,414 @@
+#!/bin/sh
+# x45stack - supervisor for the x20 replacement.
+#
+# Started at boot by /etc/init.d/x45new (only when /home/root/x45new/ENABLED
+# exists). It brings up MPD, borrows the panel from x20 and keeps x45ui alive.
+# The vendor UI is always the fallback: if anything here goes wrong x20 is
+# resumed, and nothing in the vendor rootfs was changed to make this work.
+#
+# Exit paths: SIGTERM (the init script's `stop`) and a clean x45ui exit both
+# resume x20; x45ui exiting with status 3 (the user confirmed POWER) stops
+# playback and powers the unit off.
+
+ROOT=/home/root/x45new
+BIN=$ROOT/bin
+LOG=$ROOT/x45stack.log
+PIDFILE=/var/run/x45stack.pid
+MPD_TEMPLATE=$ROOT/etc/mpd.conf
+MPD_CONF=$ROOT/mpd/mpd.conf
+MPD_PIDFILE=$ROOT/mpd/pid
+
+
+BOOTCOUNT=$ROOT/bootcount
+
+# a UI that dies more than MAX_CRASHES times inside CRASH_WINDOW seconds is not
+# going to recover: hand the panel back to x20 instead of looping forever
+MAX_CRASHES=4
+CRASH_WINDOW=120
+HEALTHY_AFTER=90
+
+log() { echo "$(date '+%F %T') x45stack: $*" >> "$LOG"; }
+
+X20PID=
+X20KILLED=
+MDNSD_STOPPED=
+x20_resume() {
+	# the vendor mDNS daemon went away with the takeover (see below); x20 needs
+	# it back when it resumes
+	if [ -n "$MDNSD_STOPPED" ]; then
+		/etc/init.d/mdnsd start >/dev/null 2>&1
+		MDNSD_STOPPED=
+		log "vendor mDNS daemon restarted"
+	fi
+	if [ -n "$X20KILLED" ]; then
+		# x20 was killed (it held the UPnP/SSDP port); start the vendor UI afresh,
+		# the same way its own init script does
+		pkill -x upmpdcli 2>/dev/null
+		/etc/rc5.d/S99x20 start >/dev/null 2>&1
+		X20KILLED=
+		log "x20 restarted"
+	else
+		[ -n "$X20PID" ] && kill -CONT "$X20PID" 2>/dev/null && log "x20 (pid $X20PID) resumed"
+	fi
+}
+
+AIRPID=
+# Stops the audio services (MPD and the AirPlay receiver). Every exit path
+# below calls this, so neither is left holding the DAC after we hand back to x20.
+mpd_stop() {
+	[ -n "$AIRPID" ] && kill "$AIRPID" 2>/dev/null
+	[ -n "$ARBPID" ] && kill "$ARBPID" 2>/dev/null
+	[ -n "$UPNPPID" ] && kill "$UPNPPID" 2>/dev/null
+	[ -n "$SPOTPID" ] && kill "$SPOTPID" 2>/dev/null
+	[ -n "$WEBPID" ] && kill "$WEBPID" 2>/dev/null
+	# the loop is gone, the server it was running is not: left alone it holds port 80 and the next start
+	# of the stack fails to bind it every 3 seconds, for ever
+	pkill -x x45web 2>/dev/null
+	pkill -x upmpdcli 2>/dev/null
+	pkill -x shairport-sync 2>/dev/null
+	pkill -x librespot 2>/dev/null
+	rm -f /tmp/x45-airplay-active
+	# the loop that keeps MPD alive goes first, or it would start a new MPD the moment this one ends
+	[ -n "$MPDPID" ] && kill "$MPDPID" 2>/dev/null
+	if [ -f "$MPD_PIDFILE" ]; then
+		kill "$(cat "$MPD_PIDFILE")" 2>/dev/null
+	fi
+	pkill -x mpd 2>/dev/null
+	[ -n "$MEDIAPID" ] && kill "$MEDIAPID" 2>/dev/null
+	pkill -x x45media 2>/dev/null
+}
+
+UIPID=
+cleanup() {
+	log "stopping"
+	[ -n "$UIPID" ] && kill "$UIPID" 2>/dev/null && wait "$UIPID" 2>/dev/null
+	mpd_stop
+	x20_resume
+	rm -f "$PIDFILE"
+	exit 0
+}
+trap cleanup TERM INT HUP
+
+echo $$ > "$PIDFILE"
+: > "$LOG"
+log "started (pid $$)"
+# the kernel's input debug printer (evbug) is loaded on this unit: it writes a console line for every key
+# and every knob edge, which at 115200 baud keeps the CPU busy while the knob turns
+rmmod evbug 2>/dev/null
+# WiFi (the USB radio stick), when it is switched on: comes up in the background while the rest starts,
+# and keeps running across restarts of the stack. Does nothing without wifi/state/enabled.
+[ -x "$BIN/x45wifi-run" ] && "$BIN/x45wifi-run" boot >> "$LOG" 2>&1 &
+# logs that only ever grow: start a new one when it is large
+for f in "$ROOT/x45web.log" "$ROOT/upmpdcli.out" "$ROOT/shairport.log" "$ROOT/librespot.log" "$ROOT/mpd/log"; do
+	[ -f "$f" ] && [ "$(wc -c < "$f")" -gt 1048576 ] && : > "$f"
+done
+mkdir -p "$ROOT/mpd/playlists"
+
+# ------------------------------------------------------------------ x20 first --
+# x20 powers up the audio board and draws its first screen. Wait for it so we
+# do not race its start-up, then give it time to finish painting before we take
+# the panel.
+n=0
+while [ $n -lt 120 ]; do
+	X20PID=$(pidof x20) && break
+	sleep 1; n=$((n + 1))
+done
+if [ -n "$X20PID" ]; then
+	log "x20 is up (pid $X20PID) after ${n}s"
+else
+	log "x20 never appeared; carrying on without it"
+fi
+
+# ----------------------------------------------------------------- audio board --
+n=0
+while [ $n -lt 90 ]; do
+	grep -q CocktailAudio /proc/asound/cards 2>/dev/null && break
+	sleep 1; n=$((n + 1))
+done
+if ! grep -q CocktailAudio /proc/asound/cards 2>/dev/null; then
+	log "audio board not enumerated; running x45ctl init"
+	"$BIN/x45ctl" init >> "$LOG" 2>&1
+	sleep 10
+fi
+grep -q CocktailAudio /proc/asound/cards 2>/dev/null || log "WARNING: still no CocktailAudio card"
+
+# ----------------------------------------------------------------------- MPD ----
+# MPD's music directory is $ROOT/media: x45media keeps a symlink in it for every
+# mounted disk (and one for the built-in test folder), mounts what is plugged in
+# later and tells MPD to rescan. Give it a first pass before MPD starts, and if a
+# disk is present but not mounted yet (the vendor UI mounts the boot-time ones)
+# wait for it a while.
+MEDIA=$ROOT/media
+pkill -x x45media 2>/dev/null   # a copy left over from an earlier run would fight this one over the library links
+"$BIN/x45media" &
+MEDIAPID=$!
+n=0
+if ls /sys/block/sd* >/dev/null 2>&1; then
+	while [ $n -lt 40 ]; do
+		[ -n "$(ls "$MEDIA" 2>/dev/null)" ] && break
+		sleep 1; n=$((n + 1))
+	done
+fi
+sleep 2
+MUSIC=$MEDIA
+log "music root $MUSIC: $(ls "$MEDIA" | tr '\n' ' ')"
+# one-time migration: the database and queue held paths under the old music root
+if [ ! -f "$ROOT/mpd/.media-root" ]; then
+	rm -f "$ROOT/mpd/database" "$ROOT/mpd/state"
+	touch "$ROOT/mpd/.media-root"
+	log "music root changed to media/: old database and queue dropped"
+fi
+# sed with | as the delimiter: the path contains spaces but never a pipe
+sed "s|@MUSIC_DIR@|$MUSIC|" "$MPD_TEMPLATE" > "$MPD_CONF"
+
+# Optional MPD password: `mpd_password = ...` in etc/x45ui.conf. Every local
+# client (x45ui, x45mpc, upmpdcli) is given it; network clients need it too.
+# A password with a quote or backslash is refused (it would break mpd.conf).
+MPD_PASSWORD=$(sed -n 's/^[[:space:]]*mpd_password[[:space:]]*=[[:space:]]*//p' "$ROOT/etc/x45ui.conf" 2>/dev/null | head -1 | tr -d '\r')
+case "$MPD_PASSWORD" in
+*\"*|*\\*) log "mpd_password contains a quote or backslash: ignored"; MPD_PASSWORD= ;;
+esac
+if [ -n "$MPD_PASSWORD" ]; then
+	echo "password \"$MPD_PASSWORD@read,add,control,admin\"" >> "$MPD_CONF"
+	export MPD_PASSWORD
+	log "mpd password set"
+else
+	unset MPD_PASSWORD
+fi
+
+# Never resume playback at boot: the saved state says "play", MPD then starts a
+# web stream before the network (DNS) and the audio board are settled, which
+# gives "Failed to decode ... Could not resolve host" and a distorted first play.
+[ -f "$ROOT/mpd/state" ] && sed -i 's/^state: play/state: pause/' "$ROOT/mpd/state"
+# and give DHCP/DNS a moment so the first manual play can resolve
+n=0
+while [ $n -lt 30 ]; do
+	ip route 2>/dev/null | grep -q '^default' && [ -s /var/run/resolv.conf ] && break
+	sleep 1; n=$((n + 1))
+done
+
+# MPD is supervised like the other services: if it ever dies the unit would otherwise stay silent until a reboot
+(
+	while true; do
+		"$BIN/mpd" --no-daemon "$MPD_CONF" >> "$ROOT/mpd/stdout" 2>&1
+		sleep 2
+	done
+) &
+MPDPID=$!
+n=0
+while [ $n -lt 20 ]; do
+	"$BIN/x45mpc" status >/dev/null 2>&1 && break
+	sleep 1; n=$((n + 1))
+done
+if "$BIN/x45mpc" status >/dev/null 2>&1; then
+	log "mpd up (pid $MPDPID, music $MUSIC)"
+else
+	log "WARNING: mpd did not answer within 20 s"
+fi
+
+# Arbiter for network-started playback. A client that tells MPD to play while an
+# AirPlay session owns the DAC gets an ALSA error (the device is busy). The newest
+# action wins, so cut the AirPlay session (the supervisor below brings the
+# receiver back) and start playback again.
+(
+	while true; do
+		sleep 1
+		[ -f /tmp/x45-airplay-active ] || continue
+		"$BIN/x45mpc" status 2>/dev/null | grep -q '^error' || continue
+		log "MPD play request while AirPlay is active: pre-empting AirPlay"
+		pkill -x shairport-sync 2>/dev/null
+		pkill -x librespot 2>/dev/null
+		rm -f /tmp/x45-airplay-active
+		sleep 3
+		"$BIN/x45mpc" play >/dev/null 2>&1
+	done
+) &
+ARBPID=$!
+
+# Radio list from the FRITZ!Box media server (a no-op if the box does not answer): the "Router stations" folder
+[ -x "$BIN/x45radio-sync" ] && "$BIN/x45radio-sync" >/dev/null 2>&1 &
+
+# -------------------------------------------------------------------- AirPlay ---
+# Classic AirPlay receiver. It is restarted if it dies; the UI also restarts it
+# on purpose (pkill) to cut a session when the user starts something else.
+if [ -x "$BIN/shairport-sync" ] && [ -f "$ROOT/etc/shairport-sync.conf" ]; then
+	(
+		while true; do
+			"$BIN/shairport-sync" -c "$ROOT/etc/shairport-sync.conf" >> "$ROOT/shairport.log" 2>&1
+			sleep 2
+		done
+	) &
+	AIRPID=$!
+	log "airplay receiver supervised (pid $AIRPID)"
+fi
+
+# ----------------------------------------------------------------------- UPnP ---
+# UPnP/DLNA renderer in front of MPD ("Cast to device", BubbleUPnP, ...). Needs
+# x20 gone (SSDP port), so it starts after the takeover below.
+start_upnp() {
+	[ -x "$BIN/upmpdcli" ] && [ -f "$ROOT/etc/upmpdcli.conf" ] || return
+	mkdir -p /tmp/upmpdcli
+	UPCONF=$ROOT/etc/upmpdcli.conf
+	if [ -n "$MPD_PASSWORD" ]; then
+		UPCONF=/tmp/upmpdcli/upmpdcli.conf
+		cp "$ROOT/etc/upmpdcli.conf" "$UPCONF"
+		echo "mpdpassword = $MPD_PASSWORD" >> "$UPCONF"
+		chmod 600 "$UPCONF"
+	fi
+	(
+		while true; do
+			"$BIN/upmpdcli" -m 1 -c "$UPCONF" >> "$ROOT/upmpdcli.out" 2>&1
+			sleep 3
+		done
+	) &
+	UPNPPID=$!
+	log "UPnP renderer supervised (pid $UPNPPID)"
+}
+
+# --------------------------------------------------------------------- Spotify ---
+# Spotify Connect receiver (librespot, needs a Premium account on the phone). It is
+# discovered over zeroconf, so no credentials are stored here; the cache keeps the
+# login the app hands over. Volume is fixed: the knob is the volume. It starts
+# after the takeover, like UPnP, so x20's mDNS daemon is already gone.
+start_spotify() {
+	[ -x "$BIN/librespot" ] || return
+	grep -qi '^[[:space:]]*spotify[[:space:]]*=[[:space:]]*off' "$ROOT/etc/x45ui.conf" 2>/dev/null && return
+	mkdir -p "$ROOT/spotify-cache"
+	(
+		while true; do
+			"$BIN/librespot" --name "Cocktail Audio X45" --device-type speaker \
+				--backend alsa --device hw:CocktailAudio,0 --format S16 --bitrate 320 \
+				--volume-ctrl fixed --initial-volume 100 --dither none --disable-audio-cache \
+				--cache "$ROOT/spotify-cache" --onevent "$BIN/x45-spotify-event" \
+				>> "$ROOT/librespot.log" 2>&1
+			sleep 3
+		done
+	) &
+	SPOTPID=$!
+	log "Spotify Connect receiver supervised (pid $SPOTPID)"
+}
+
+# ------------------------------------------------------------------- the panel --
+# let x20 finish its own start-up drawing before we freeze it
+sleep 10
+X20PID=$(pidof x20)
+# x20 is KILLED, not paused: a paused process still owns its sockets, and the
+# UPnP renderer needs the SSDP port (UDP 1900) that x20's own DLNA code holds.
+# x20_run exits on SIGKILL (status 137) so nothing respawns it. x20_resume starts
+# it again by the vendor's own init script if we ever hand back.
+if [ -n "$X20PID" ] && kill -KILL "$X20PID" 2>/dev/null; then
+	X20KILLED=1
+	log "x20 (pid $X20PID) killed"
+	# x20 registered its own AirPlay receiver ("X45", port 9800) with the system
+	# mDNS daemon, which keeps announcing it after x20 is paused: every phone
+	# would list a dead receiver next to the working one. Take the daemon down
+	# for as long as x20 is paused; x20_resume starts it again.
+	if [ -n "$(pidof mdnsd)" ]; then
+		kill "$(pidof mdnsd)" 2>/dev/null
+		MDNSD_STOPPED=1
+		log "vendor mDNS daemon stopped (its AirPlay record for the killed x20 would be stale)"
+	fi
+fi
+sleep 1
+start_upnp
+start_web() {
+	[ -x "$BIN/x45web" ] || return
+	grep -qi '^[[:space:]]*web[[:space:]]*=[[:space:]]*off' "$ROOT/etc/x45ui.conf" 2>/dev/null && return
+	# a server left over from an earlier run would keep port 80 and this one would fail to bind it, for ever
+	pkill -x x45web 2>/dev/null && sleep 1
+	(
+		while true; do
+			"$BIN/x45web" -p 80 -d "$ROOT/web" >> "$ROOT/x45web.log" 2>&1
+			sleep 3
+		done
+	) &
+	WEBPID=$!
+	log "web interface on port 80 (pid $WEBPID)"
+}
+
+# The wired port loses frames at 1000 Mbit on this board (receive errors, TCP into the unit crawls at 1 MB/s; see
+# docs/X45-FILES.md). etc/eth-speed holds the speed to negotiate (100); an empty or missing file leaves it alone.
+# The link comes up well after boot, so this waits for it. Autonegotiation stays on, advertising that speed only.
+eth_speed() {
+	want=$(cat "$ROOT/etc/eth-speed" 2>/dev/null)
+	[ -n "$want" ] || return
+	(
+		n=0
+		while [ "$n" -lt 60 ]; do
+			if [ "$(cat /sys/class/net/eth0/carrier 2>/dev/null)" = 1 ]; then
+				if [ "$(cat /sys/class/net/eth0/speed 2>/dev/null)" != "$want" ]; then
+					ethtool -s eth0 speed "$want" duplex full autoneg on >/dev/null 2>&1
+					log "wired port held at $want Mbit"
+				fi
+				exit 0
+			fi
+			n=$((n + 1))
+			sleep 2
+		done
+	) &
+}
+
+eth_speed
+start_spotify
+start_web
+
+# Input tracing is for diagnosing the panel and is off by default: a turning knob
+# writes dozens of lines a second. `touch /home/root/x45new/etc/ui-trace` and
+# restart to switch it on; the log is emptied at every start.
+UI_TRACE=
+[ -f "$ROOT/etc/ui-trace" ] && UI_TRACE=--trace
+: > "$ROOT/x45ui.log"
+
+crashes=0
+window_start=$(date +%s)
+while true; do
+	started=$(date +%s)
+	"$BIN/x45ui" --keep $UI_TRACE >> "$ROOT/x45ui.log" 2>&1 &
+	UIPID=$!
+	log "x45ui started (pid $UIPID)"
+	# a UI that has stayed up this long counts as a healthy boot
+	( sleep $HEALTHY_AFTER; kill -0 $UIPID 2>/dev/null && echo 0 > "$BOOTCOUNT" ) &
+	wait $UIPID
+	rc=$?
+	UIPID=
+	log "x45ui exited with status $rc"
+
+	case $rc in
+	4)
+		# the UI was asked to restart itself (SIGUSR1: a new build is in place): not a crash
+		log "x45ui restarts on request"
+		continue
+		;;
+	0)
+		# SIGTERM/INT or a deliberate quit: give the vendor UI back
+		mpd_stop
+		x20_resume
+		rm -f "$PIDFILE"
+		exit 0
+		;;
+	3)
+		log "power-off confirmed on the panel"
+		"$BIN/x45mpc" stop >/dev/null 2>&1
+		sleep 1
+		mpd_stop
+		poweroff
+		exit 0
+		;;
+	esac
+
+	now=$(date +%s)
+	if [ $((now - window_start)) -gt $CRASH_WINDOW ]; then
+		crashes=0
+		window_start=$now
+	fi
+	crashes=$((crashes + 1))
+	if [ $crashes -gt $MAX_CRASHES ]; then
+		log "x45ui crashed $crashes times in ${CRASH_WINDOW}s: giving up, handing the panel back to x20"
+		mpd_stop
+		x20_resume
+		rm -f "$PIDFILE"
+		exit 1
+	fi
+	# a crash right after start-up must not spin the CPU
+	[ $((now - started)) -lt 2 ] && sleep 2
+done

@@ -1,0 +1,44 @@
+#!/bin/sh
+# Started by the panel software when the Bluetooth input is chosen. Brings the USB radio stick up
+# (flip -> firmware load -> HCI), then becomes x45bt, the A2DP speaker. The panel keeps our stdin
+# open as its command channel; it leaves with the input. Progress and failures go to the status
+# file the panel reads while x45bt is not running yet.
+ROOT=/home/root/x45new
+BIN=$ROOT/bin
+BT=$ROOT/bt
+ST=/tmp/x45bt.status
+N=1000000
+
+status() {	# state, step
+	N=$((N + 1))
+	printf 'seq=%s\nstate=%s\nstep=%s\n' $N "$1" "$2" > $ST.tmp && mv $ST.tmp $ST
+}
+fail() {
+	N=$((N + 1))
+	printf 'seq=%s\nstate=error\nerror=%s\n' $N "$1" > $ST.tmp && mv $ST.tmp $ST
+	exit 1
+}
+. $ROOT/lib/sh/x45radio.sh
+
+status starting "looking for the radio stick"
+radio_up
+if [ -n "$RADIO_FRESH" ]; then
+	status starting "starting the controller"
+	sleep 4		# the controller needs a moment before the first HCI command
+fi
+
+status starting "starting bluetooth"
+export X45BT_TLV_DIR=$BT/btstack_
+# the UI truncates its log at every start; keep the history for diagnosing
+exec >> /tmp/x45bt.history 2>&1
+echo "=== $(date) x45bt starting"
+exec 3<&0
+$BIN/x45bt <&3 &
+CHILD=$!
+trap 'kill -INT $CHILD 2>/dev/null; ( sleep 5; kill -TERM $CHILD 2>/dev/null; sleep 3; kill -KILL $CHILD 2>/dev/null ) >/dev/null 2>&1 &' INT TERM
+while kill -0 $CHILD 2>/dev/null; do wait $CHILD; rc=$?; done
+echo "=== $(date) x45bt exited, status $rc"
+case $rc in
+0|130) exit 0 ;;
+esac
+fail "x45bt stopped unexpectedly (status $rc)"

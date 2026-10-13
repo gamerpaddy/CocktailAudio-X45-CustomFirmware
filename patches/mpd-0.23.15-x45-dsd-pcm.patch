@@ -1,0 +1,479 @@
+diff -u a/src/output/Filtered.cxx b/src/output/Filtered.cxx
+--- a/src/output/Filtered.cxx	2026-10-08 21:01:54.291466083 +0200
++++ b/src/output/Filtered.cxx	2026-10-08 21:01:54.292333583 +0200
+@@ -81,14 +81,40 @@
+ 	}
+ }
+ 
++/* X45: the XMOS USB bridge takes native DSD up to DSD128 (MPD rate 705600, 176400 DSD_U32 frames/s) */
++static constexpr unsigned X45_DSD_NATIVE_MAX = 705600;
++
++/** The PCM format a DSD stream is played in when it cannot go out natively: 32 bit, 352.8 kHz at most
++ * (DSD64 is already there, the faster ones are decimated by the resampler). */
++static AudioFormat
++X45DsdAsPcm(AudioFormat f) noexcept
++{
++	f.format = SampleFormat::S32;
++	while (f.sample_rate > 352800 && f.sample_rate % 2 == 0)
++		f.sample_rate /= 2;
++	return f;
++}
++
+ void
+ FilteredAudioOutput::OpenOutputAndConvert(AudioFormat desired_audio_format)
+ {
++	if (desired_audio_format.format == SampleFormat::DSD &&
++	    desired_audio_format.sample_rate > X45_DSD_NATIVE_MAX)
++		/* the XMOS advertises DSD256 and refuses it: play it as PCM */
++		desired_audio_format = X45DsdAsPcm(desired_audio_format);
++
+ 	out_audio_format = desired_audio_format;
+ 
+ 	try {
+ 		output->Open(out_audio_format);
+ 	} catch (...) {
++		if (desired_audio_format.format == SampleFormat::DSD) {
++			LogError(std::current_exception());
++			LogError(output_domain, "Native DSD failed, retrying as PCM");
++			OpenOutputAndConvert(X45DsdAsPcm(desired_audio_format));
++			return;
++		}
++
+ 		std::throw_with_nested(FormatRuntimeError("Failed to open %s",
+ 							  GetLogName()));
+ 	}
+diff -u a/src/pcm/Convert.cxx b/src/pcm/Convert.cxx
+--- a/src/pcm/Convert.cxx	2026-10-08 21:01:54.295042482 +0200
++++ b/src/pcm/Convert.cxx	2026-10-08 21:01:54.295877482 +0200
+@@ -40,7 +40,9 @@
+ 	AudioFormat format = _src_format;
+ 	if (format.format == SampleFormat::DSD) {
+ #ifdef ENABLE_DSD
+-		dsd2pcm_float = dest_format.format == SampleFormat::FLOAT;
++		/* X45: a DSD stream that is brought down to a lower PCM rate stays float up to the decimator */
++		dsd2pcm_float = dest_format.format == SampleFormat::FLOAT ||
++			dest_format.sample_rate < format.sample_rate;
+ 		format.format = dsd2pcm_float
+ 			? SampleFormat::FLOAT
+ 			: SampleFormat::S24_P32;
+diff -u a/src/pcm/Dsd2Pcm.cxx b/src/pcm/Dsd2Pcm.cxx
+--- a/src/pcm/Dsd2Pcm.cxx	2026-10-08 21:01:54.311058482 +0200
++++ b/src/pcm/Dsd2Pcm.cxx	2026-10-08 21:01:54.311660681 +0200
+@@ -36,6 +36,7 @@
+ #include "util/GenerateArray.hxx"
+ 
+ #include <cassert>
++#include <cstring>
+ 
+ #include <stdlib.h>
+ #include <string.h>
+@@ -168,11 +169,80 @@
+ 
+ static constexpr auto ctables_s24 = GenerateArray<CTABLES>(GenerateCtableS24);
+ 
++/*
++ * X45: the filter output for the newest byte x[n] is
++ *   sum_i ctables[i][x[n-i]] + ctables[i][bit_reverse(x[n-11+i])]   (i = 0..5)
++ * because the FIFO above bit-reverses each byte once, when it is 6 bytes old.
++ * The second half gets its own tables (index already reversed), so a linear
++ * history of the last 11 bytes is all the state there is.
++ */
++struct X45Dsd2PcmTables {
++	float first[CTABLES][256];
++	float second[CTABLES][256];
++
++	X45Dsd2PcmTables() noexcept {
++		for (size_t i = 0; i < CTABLES; ++i)
++			for (size_t e = 0; e < 256; ++e) {
++				first[i][e] = ctables[i][e];
++				second[i][e] = ctables[i][bit_reverse(uint8_t(e))];
++			}
++	}
++};
++
++static const X45Dsd2PcmTables &
++GetX45Tables() noexcept
++{
++	static const X45Dsd2PcmTables tables;
++	return tables;
++}
++
++void
++Dsd2Pcm::TranslateFast(size_t samples,
++		       const uint8_t *gcc_restrict src, ptrdiff_t src_stride,
++		       float *dst, ptrdiff_t dst_stride) noexcept
++{
++	static_assert(CTABLES == 6, "TranslateFast is written for 6 tables");
++	constexpr size_t H = CTABLES * 2 - 1;
++	constexpr size_t BLOCK = 1024;
++	const X45Dsd2PcmTables &t = GetX45Tables();
++	uint8_t x[H + BLOCK];
++
++	std::memcpy(x, x45_hist.data(), H);
++
++	while (samples > 0) {
++		const size_t n = samples < BLOCK ? samples : BLOCK;
++
++		for (size_t j = 0; j < n; ++j) {
++			x[H + j] = *src;
++			src += src_stride;
++		}
++
++		for (size_t j = 0; j < n; ++j) {
++			const uint8_t *p = x + H + j;
++			const float a = (t.first[0][p[0]] + t.first[1][p[-1]]) +
++				(t.first[2][p[-2]] + t.first[3][p[-3]]) +
++				(t.first[4][p[-4]] + t.first[5][p[-5]]);
++			const float b = (t.second[0][p[-11]] + t.second[1][p[-10]]) +
++				(t.second[2][p[-9]] + t.second[3][p[-8]]) +
++				(t.second[4][p[-7]] + t.second[5][p[-6]]);
++
++			*dst = a + b;
++			dst += dst_stride;
++		}
++
++		std::memmove(x, x + n, H);
++		samples -= n;
++	}
++
++	std::memcpy(x45_hist.data(), x, H);
++}
++
+ void
+ Dsd2Pcm::Reset() noexcept
+ {
+ 	/* my favorite silence pattern */
+ 	fifo.fill(0x69);
++	x45_hist.fill(0x69);
+ 
+ 	fifopos = 0;
+ 	/* 0x69 = 01101001
+@@ -266,15 +336,11 @@
+ {
+ 	assert(channels <= per_channel.max_size());
+ 
+-	if (channels == 2) {
+-		TranslateStereo(n_frames, src, dest);
+-		return;
+-	}
+-
++	/* X45: the table version, for every channel count */
+ 	for (unsigned i = 0; i < channels; ++i) {
+-		per_channel[i].Translate(n_frames,
+-					 src++, channels,
+-					 dest++, channels);
++		per_channel[i].TranslateFast(n_frames,
++					     src++, channels,
++					     dest++, channels);
+ 	}
+ }
+ 
+diff -u a/src/pcm/Dsd2Pcm.hxx b/src/pcm/Dsd2Pcm.hxx
+--- a/src/pcm/Dsd2Pcm.hxx	2026-10-08 21:01:54.308031082 +0200
++++ b/src/pcm/Dsd2Pcm.hxx	2026-10-08 21:01:54.308627282 +0200
+@@ -54,6 +54,9 @@
+ 	std::array<uint8_t, FIFOSIZE> fifo;
+ 	size_t fifopos;
+ 
++	/* X45: the last 11 input bytes of the float path (TranslateFast) */
++	std::array<uint8_t, 11> x45_hist;
++
+ public:
+ 	Dsd2Pcm() noexcept {
+ 		Reset();
+@@ -82,6 +85,16 @@
+ 			  const uint8_t *src, ptrdiff_t src_stride,
+ 			  int32_t *dst, ptrdiff_t dst_stride) noexcept;
+ 
++	/**
++	 * X45: the same result as Translate() (to float rounding),
++	 * computed from a linear history with one table per filter
++	 * half: no bit reversal and no double precision per sample.
++	 * Do not mix the two on one stream.
++	 */
++	void TranslateFast(size_t samples,
++			   const uint8_t *src, ptrdiff_t src_stride,
++			   float *dst, ptrdiff_t dst_stride) noexcept;
++
+ private:
+ 	void ApplySample(size_t ffp, uint8_t src) noexcept;
+ 	float CalcOutputSample(size_t ffp) const noexcept;
+diff -u a/src/pcm/FallbackResampler.cxx b/src/pcm/FallbackResampler.cxx
+--- a/src/pcm/FallbackResampler.cxx	2026-10-08 21:01:54.304957782 +0200
++++ b/src/pcm/FallbackResampler.cxx	2026-10-08 21:01:54.305567082 +0200
+@@ -19,7 +19,69 @@
+ 
+ #include "FallbackResampler.hxx"
+ 
++#include <algorithm>
+ #include <cassert>
++#include <cmath>
++#include <cstring>
++
++#ifdef __ARM_NEON
++#include <arm_neon.h>
++#endif
++
++/* X45: odd, so the filter has a centre tap; 127 taps at the high rate is a
++ * transition band of 0.066 of that rate (93 kHz at 1.4112 MHz) and about
++ * 125 dB of stop-band rejection */
++static constexpr unsigned X45_FIR_TAPS = 127;
++/* ...padded with a zero tap to a multiple of the NEON vector length */
++static constexpr unsigned X45_FIR_WIN = 128;
++static constexpr double X45_FIR_BETA = 13.0;
++static constexpr unsigned X45_MAX_DECIM = 16;
++
++static double
++BesselI0(double x) noexcept
++{
++	double sum = 1, term = 1;
++
++	for (int k = 1; k < 60; ++k) {
++		const double h = x / (2 * k);
++		term *= h * h;
++		sum += term;
++		if (term < sum * 1e-16)
++			break;
++	}
++	return sum;
++}
++
++/**
++ * Kaiser-windowed sinc, cut-off at half the output rate (the middle of
++ * the transition band), unity gain at DC.
++ */
++void
++FallbackPcmResampler::DesignDecimator(unsigned factor) noexcept
++{
++	const int mid = (X45_FIR_TAPS - 1) / 2;
++	const double fc = 0.5 / factor;   /* cycles per input sample */
++	const double pi = 3.14159265358979323846;
++	std::vector<double> h(X45_FIR_TAPS);
++	double sum = 0;
++
++	for (int i = 0; i < (int)X45_FIR_TAPS; ++i) {
++		const int n = i - mid;
++		const double r = double(n) / mid;
++		const double sinc = n == 0 ? 2 * fc
++			: std::sin(2 * pi * fc * n) / (pi * n);
++		const double win = BesselI0(X45_FIR_BETA * std::sqrt(1 - r * r)) /
++			BesselI0(X45_FIR_BETA);
++
++		h[i] = sinc * win;
++		sum += h[i];
++	}
++
++	/* window order: taps[k] multiplies x[t - (X45_FIR_WIN - 1) + k], the first one is the padding */
++	taps.assign(X45_FIR_WIN, 0.0f);
++	for (unsigned k = 1; k < X45_FIR_WIN; ++k)
++		taps[k] = float(h[X45_FIR_WIN - 1 - k] / sum);
++}
+ 
+ AudioFormat
+ FallbackPcmResampler::Open(AudioFormat &af, unsigned new_sample_rate)
+@@ -27,7 +89,17 @@
+ 	assert(af.IsValid());
+ 	assert(audio_valid_sample_rate(new_sample_rate));
+ 
+-	switch (af.format) {
++	decim = 0;
++	if (new_sample_rate < af.sample_rate &&
++	    af.sample_rate % new_sample_rate == 0 &&
++	    af.sample_rate / new_sample_rate <= X45_MAX_DECIM) {
++		/* X45: a proper decimator, in float */
++		decim = af.sample_rate / new_sample_rate;
++		af.format = SampleFormat::FLOAT;
++		DesignDecimator(decim);
++		hist.assign((X45_FIR_WIN - 1) * af.channels, 0.0f);
++		phase = 0;
++	} else switch (af.format) {
+ 	case SampleFormat::UNDEFINED:
+ 		assert(false);
+ 		gcc_unreachable();
+@@ -58,8 +130,93 @@
+ void
+ FallbackPcmResampler::Close() noexcept
+ {
++	taps.clear();
++	hist.clear();
++	work.clear();
++	decim = 0;
+ }
+ 
++void
++FallbackPcmResampler::Reset() noexcept
++{
++	std::fill(hist.begin(), hist.end(), 0.0f);
++	phase = 0;
++}
++
++/**
++ * y[m] = sum h[i] * x[m * decim - i]. The channels are split into planes so that
++ * the 128-tap window is contiguous memory: NEON on the ARM, plain C elsewhere.
++ */
++static inline float
++Dot128(const float *gcc_restrict h, const float *gcc_restrict w) noexcept
++{
++#ifdef __ARM_NEON
++	float32x4_t a0 = vdupq_n_f32(0), a1 = a0, a2 = a0, a3 = a0;
++
++	for (unsigned k = 0; k < X45_FIR_WIN; k += 16) {
++		a0 = vmlaq_f32(a0, vld1q_f32(h + k), vld1q_f32(w + k));
++		a1 = vmlaq_f32(a1, vld1q_f32(h + k + 4), vld1q_f32(w + k + 4));
++		a2 = vmlaq_f32(a2, vld1q_f32(h + k + 8), vld1q_f32(w + k + 8));
++		a3 = vmlaq_f32(a3, vld1q_f32(h + k + 12), vld1q_f32(w + k + 12));
++	}
++
++	a0 = vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3));
++	const float32x2_t s = vadd_f32(vget_low_f32(a0), vget_high_f32(a0));
++	return vget_lane_f32(vpadd_f32(s, s), 0);
++#else
++	float a0 = 0, a1 = 0, a2 = 0, a3 = 0;
++
++	for (unsigned k = 0; k < X45_FIR_WIN; k += 4) {
++		a0 += h[k] * w[k];
++		a1 += h[k + 1] * w[k + 1];
++		a2 += h[k + 2] * w[k + 2];
++		a3 += h[k + 3] * w[k + 3];
++	}
++
++	return (a0 + a1) + (a2 + a3);
++#endif
++}
++
++ConstBuffer<void>
++FallbackPcmResampler::Decimate(ConstBuffer<void> src)
++{
++	const unsigned ch = format.channels;
++	const size_t h = X45_FIR_WIN - 1;   /* frames of history per channel */
++	const size_t frames = src.size / (ch * sizeof(float));
++	const float *in = (const float *)src.data;
++	const size_t plane = h + frames;
++
++	/* plane c: its history, then this block */
++	work.resize(plane * ch);
++	for (unsigned c = 0; c < ch; ++c) {
++		float *p = work.data() + c * plane;
++
++		std::memcpy(p, hist.data() + c * h, h * sizeof(float));
++		for (size_t f = 0; f < frames; ++f)
++			p[h + f] = in[f * ch + c];
++		std::memcpy(hist.data() + c * h, p + frames, h * sizeof(float));
++	}
++
++	if (frames <= phase) {
++		/* nothing to emit */
++		phase -= frames;
++		return { buffer.Get(sizeof(float)), 0 };
++	}
++
++	const size_t out_frames = (frames - phase + decim - 1) / decim;
++	float *out = (float *)buffer.Get(out_frames * ch * sizeof(float));
++	const float *c0 = taps.data();
++	size_t t = phase;   /* start of the window, in the plane */
++
++	for (size_t o = 0; o < out_frames; ++o, t += decim)
++		for (unsigned c = 0; c < ch; ++c)
++			out[o * ch + c] = Dot128(c0, work.data() + c * plane + t);
++
++	phase = t - frames;
++	return { out, out_frames * ch * sizeof(float) };
++}
++
++
+ template<typename T>
+ static ConstBuffer<T>
+ pcm_resample_fallback(PcmBuffer &buffer,
+@@ -116,6 +273,9 @@
+ ConstBuffer<void>
+ FallbackPcmResampler::Resample(ConstBuffer<void> src)
+ {
++	if (decim != 0)
++		return Decimate(src);
++
+ 	switch (format.format) {
+ 	case SampleFormat::UNDEFINED:
+ 	case SampleFormat::S8:
+diff -u a/src/pcm/FallbackResampler.hxx b/src/pcm/FallbackResampler.hxx
+--- a/src/pcm/FallbackResampler.hxx	2026-10-08 21:01:54.301886082 +0200
++++ b/src/pcm/FallbackResampler.hxx	2026-10-08 21:01:54.302526582 +0200
+@@ -24,9 +24,16 @@
+ #include "Buffer.hxx"
+ #include "AudioFormat.hxx"
+ 
++#include <vector>
++
+ /**
+  * A naive resampler that is used when no external library was found
+  * (or when the user explicitly asks for bad quality).
++ *
++ * X45: a plain integer down-sampling (1411200 -> 352800 Hz for DSD256
++ * played as PCM) is done by a windowed-sinc FIR decimator instead; the
++ * naive path below only repeats samples and would fold the whole
++ * ultrasonic noise of a DSD stream into the audio band.
+  */
+ class FallbackPcmResampler final : public PcmResampler {
+ 	AudioFormat format;
+@@ -34,9 +41,24 @@
+ 
+ 	PcmBuffer buffer;
+ 
++	/** X45: decimation factor, 0 = the naive resampler */
++	unsigned decim = 0;
++	/** X45: symmetric low-pass, taps.size() is odd */
++	std::vector<float> taps;
++	/** X45: the last taps.size() - 1 frames of the previous block */
++	std::vector<float> hist;
++	/** X45: input block with its history in front */
++	std::vector<float> work;
++	/** X45: input frames to skip before the next output frame */
++	unsigned phase = 0;
++
++	void DesignDecimator(unsigned factor) noexcept;
++	ConstBuffer<void> Decimate(ConstBuffer<void> src);
++
+ public:
+ 	AudioFormat Open(AudioFormat &af, unsigned new_sample_rate) override;
+ 	void Close() noexcept override;
++	void Reset() noexcept override;
+ 	ConstBuffer<void> Resample(ConstBuffer<void> src) override;
+ };
+ 
+diff -u a/src/pcm/PcmDsd.cxx b/src/pcm/PcmDsd.cxx
+--- a/src/pcm/PcmDsd.cxx	2026-10-08 21:01:54.298607582 +0200
++++ b/src/pcm/PcmDsd.cxx	2026-10-08 21:01:54.299376882 +0200
+@@ -22,6 +22,21 @@
+ #include "util/ConstBuffer.hxx"
+ 
+ #include <cassert>
++#include <cmath>
++#include <cstdlib>
++
++/* X45: dsd2pcm hands out +-1.0 for a stream of all ones, i.e. 100 % modulation, while a full-scale
++ * DSD signal is 50 % modulation, so PCM made from DSD peaks 6 dB below full scale. Whether the DAC plays
++ * native DSD at that level is not measured: X45_DSD_GAIN_DB (environment of the MPD process, default 0) adds gain. */
++static float
++X45DsdGain() noexcept
++{
++	static const float gain = [] {
++		const char *s = std::getenv("X45_DSD_GAIN_DB");
++		return s != nullptr ? float(std::pow(10.0, std::atof(s) / 20)) : 1.0f;
++	}();
++	return gain;
++}
+ 
+ ConstBuffer<float>
+ PcmDsd::ToFloat(unsigned channels, ConstBuffer<uint8_t> src) noexcept
+@@ -36,6 +51,12 @@
+ 	auto *dest = buffer.GetT<float>(num_samples);
+ 
+ 	dsd2pcm.Translate(channels, num_frames, src.data, dest);
++
++	const float gain = X45DsdGain();
++	if (gain != 1.0f)
++		for (size_t i = 0; i < num_samples; ++i)
++			dest[i] *= gain;
++
+ 	return { dest, num_samples };
+ }
+ 

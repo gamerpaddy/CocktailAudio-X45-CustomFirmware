@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>X45</title>
+<style>
+:root{--bg:#0b0e14;--panel:#121722;--line:#232b3b;--text:#e6eaf2;--dim:#8590a6;--accent:#6cc788;--warn:#f08060;--btn:#1a2132;--amber:#e8b64a}
+@media (prefers-color-scheme:light){:root{--bg:#f2f4f8;--panel:#fff;--line:#d5dbe6;--text:#1a2132;--dim:#5d677c;--accent:#1d8a49;--warn:#c4472a;--btn:#e8ecf3;--amber:#b57f10}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,sans-serif}
+header{display:flex;gap:12px;align-items:center;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+header b{font-size:18px;letter-spacing:.08em}
+.pill{padding:2px 10px;border-radius:12px;background:var(--btn);color:var(--accent);font-size:13px}
+.pill.warn{color:var(--warn)}
+#msg{color:var(--dim);font-size:13px;flex:1;min-width:120px}
+main{display:grid;grid-template-columns:minmax(300px,1fr) minmax(320px,1.3fr);gap:16px;padding:16px;max-width:1400px;margin:auto}
+@media (max-width:860px){main{grid-template-columns:1fr}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px}
+h3{margin:0 0 8px;font-size:12px;letter-spacing:.1em;color:var(--dim);text-transform:uppercase}
+button{background:var(--btn);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font:inherit;cursor:pointer}
+button:hover{border-color:var(--accent)}button:active{background:var(--accent);color:#000}
+button.on{border-color:var(--accent);color:var(--accent)}
+button.sm{padding:3px 8px;font-size:13px}
+button.del:hover{border-color:var(--warn);color:var(--warn)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.row>label{color:var(--dim);min-width:96px}
+input[type=range]{flex:1;min-width:120px;accent-color:var(--accent)}
+input[type=number],input[type=text]{background:var(--btn);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:7px;font:inherit;width:110px}
+#scr{width:100%;border-radius:6px;border:1px solid var(--line);display:block;background:#000}
+.pad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;max-width:260px;margin:8px auto}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.tabs button.on{background:var(--accent);color:#000}
+ul.list{list-style:none;margin:0;padding:0;max-height:430px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+ul.list li{padding:7px 12px;border-bottom:1px solid var(--line);cursor:pointer;display:flex;gap:10px;justify-content:space-between;align-items:center}
+ul.list li:last-child{border:0}
+ul.list li:hover{background:var(--btn)}
+ul.list li.sel{background:var(--btn);color:var(--accent)}
+ul.list li .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ul.list li .acts{display:flex;gap:4px}
+.big{font-size:22px;margin:2px 0}.dim{color:var(--dim)}.acc{color:var(--accent)}svg .dim{fill:var(--dim)}svg .acc{fill:var(--accent)}
+.bar{height:10px;background:var(--btn);border-radius:6px;cursor:pointer;overflow:hidden;margin:8px 0}
+.bar>div{height:100%;background:var(--accent)}
+#slide{max-width:260px;max-height:260px;border-radius:8px;margin-top:8px}
+.kv{display:grid;grid-template-columns:150px 1fr;gap:4px 10px}
+.kv span:nth-child(odd){color:var(--dim)}
+.kv h4{grid-column:1/-1;margin:12px 0 2px;font-size:12px;letter-spacing:.1em;color:var(--dim);text-transform:uppercase;border-bottom:1px solid var(--line)}
+.ok{color:var(--accent)}.bad{color:var(--warn)}
+.favrow{flex-wrap:nowrap}.favrow .fn{flex:0 1 190px;min-width:80px;width:auto}.favrow .fu{flex:1;min-width:120px;width:auto}
+.freq{font-size:44px;font-variant-numeric:tabular-nums;text-align:center;margin:6px 0}
+</style>
+</head>
+<body>
+<header>
+  <b>X45</b><span class="pill" id="h_in">-</span>
+  <span class="pill warn" id="h_rec" style="display:none"></span>
+  <span id="msg"></span>
+  <button id="b_pwr" title="Shut the unit down">Power</button>
+</header>
+<main>
+<div>
+  <section>
+    <h3>Panel <label style="float:right;text-transform:none;letter-spacing:0"><input type="checkbox" id="live" checked> live</label></h3>
+    <img id="scr" alt="panel">
+    <div class="pad">
+      <button data-c="key menu">MENU</button><button data-c="ir up">&#9650;</button><button data-c="key input">INPUT</button>
+      <button data-c="ir left">&#9664;</button><button data-c="key ok">OK</button><button data-c="ir right">&#9654;</button>
+      <button data-c="key return">RETURN</button><button data-c="ir down">&#9660;</button><button data-c="key stop">STOP</button>
+    </div>
+    <div class="row"><label>Scroll knob</label><button data-c="knob scroll -1">&#8630; ccw</button><button data-c="knob scroll 1">cw &#8631;</button></div>
+  </section>
+  <section style="margin-top:16px" id="volsec">
+    <h3>Volume</h3>
+    <div class="row"><input type="range" id="vol" min="0" max="100"><span id="vol_v" style="min-width:34px;text-align:right"></span><button id="mute">Mute</button></div>
+  </section>
+</div>
+<div>
+  <section>
+    <div class="tabs" id="tabs"></div>
+    <div id="body"></div>
+  </section>
+</div>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+/* tab id, label, panel screen to show (-1 none). Screens: 0 player 1 library 2 radio 3 cd 4 tuner 5 status 6 input 7 options */
+const TABS = [["player","Player",0],["library","Library",1],["favs","Favourites",-1],["cd","CD",3],["tuner","FM / DAB",4],["input","Input",6],["options","Options",7],["status","Status",5]];
+/* Tabs that live in their own file (tabs/NAME.js, loaded at the bottom) register here:
+ *   registerTab({id, label, render(): html, wire(el), show(), busy(): bool})
+ * They get the helpers of this page: $, esc, list, cmd, put, token. */
+const MODS = {};
+function registerTab(m){ MODS[m.id] = m; TABS.splice(TABS.length - 1, 0, [m.id, m.label, m.screen == null ? -1 : m.screen]); tabsSig = ""; }
+/* the CD and radio-module tabs only exist while that input is chosen */
+const tabShown = id => id==="cd" ? !!(S && S.input_name==="cd") : id==="tuner" ? !!(S && (S.input_name==="fm" || S.input_name==="dab")) : true;
+const TOKEN_KEY = "x45token";
+/* the API names an input with plain words; people read the same labels as on the panel */
+const IN_LABEL = {network:"Network", fm:"FM", "pc usb":"PC USB", "aes ebu":"AES/EBU", coaxial:"Coaxial", optical:"Optical",
+                  "line in":"Line in", "aux in":"Aux in", phono:"Phono", cd:"CD", dab:"DAB+", bluetooth:"Bluetooth"};
+const lab = n => IN_LABEL[n] || n;
+let S = null, tab = "player", busy = 0, SYS = null, lastSys = 0;
+const sigs = {};          /* last rendered markup per container: re-render only on change */
+
+function token(){ try { return localStorage.getItem(TOKEN_KEY) || ""; } catch(e){ return ""; } }
+async function cmd(c){
+  const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
+  try {
+    const r = await fetch("/api/cmd",{method:"POST",body:c+"\n",headers:h});
+    if(r.status === 401){ const t = prompt("This unit needs an access token:"); if(t){ try{localStorage.setItem(TOKEN_KEY,t);}catch(e){} cmd(c); } return; }
+  } catch(e){}
+  setTimeout(poll,150); setTimeout(poll,600);
+}
+document.querySelectorAll("[data-c]").forEach(b => b.onclick = () => cmd(b.dataset.c));
+
+const fmt = t => { t=Math.max(0,Math.floor(t||0)); return Math.floor(t/60)+":"+String(t%60).padStart(2,"0"); };
+const esc = s => String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+/* write markup only when it changed, and keep every list where the user scrolled it */
+function put(el, html){
+  if(sigs[el.id] === html) return false;
+  const keep = [...el.querySelectorAll("ul.list")].map(u => u.scrollTop);
+  const top = document.scrollingElement.scrollTop;
+  const ae = document.activeElement, aid = ae && ae.id && el.contains(ae) ? ae.id : null, aval = aid ? ae.value : null;
+  el.innerHTML = html; sigs[el.id] = html;
+  if(aid){ const n = $(aid); if(n){ n.value = aval; n.focus(); } }
+  el.querySelectorAll("ul.list").forEach((u,i) => { if(keep[i]) u.scrollTop = keep[i]; });
+  document.scrollingElement.scrollTop = top;
+  return true;
+}
+function list(items, sel){
+  return '<ul class="list">'+items.map((it,i)=>'<li data-i="'+i+'" class="'+(i===sel?"sel":"")+'">'+it+'</li>').join("")+"</ul>";
+}
+function wire(el, fn){
+  el.querySelectorAll("[data-c]").forEach(b => b.onclick = e => { e.stopPropagation(); cmd(b.dataset.c); });
+  el.querySelectorAll("ul.list li").forEach(li => li.onclick = () => fn && fn(+li.dataset.i));
+}
+
+let tabsSig = "";
+function renderTabs(){
+  const shown = TABS.filter(t => tabShown(t[0]));
+  if(!tabShown(tab)) tab = "player";
+  const sig = shown.map(t => t[0]).join() + "|" + tab;
+  if(sig === tabsSig) return;
+  tabsSig = sig;
+  $("tabs").innerHTML = shown.map(([id,l])=>'<button data-t="'+id+'" class="'+(tab===id?"on":"")+'">'+l+'</button>').join("");
+  document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => {
+    tab = b.dataset.t; const t = TABS.find(x=>x[0]===tab);
+    if(t[2] >= 0) cmd("screen " + t[2]);
+    if(tab === "favs") favLoad();
+    if(MODS[tab] && MODS[tab].show) MODS[tab].show();
+    renderTabs(); sigs.body = null; render();
+  });
+}
+
+function transport(m){
+  return '<div class="row">'+
+   '<button data-c="mpd previous">&#9198;</button><button data-c="ir rew">-10s</button>'+
+   '<button data-c="key ok" class="'+(m.state==="play"?"on":"")+'">'+(m.state==="play"?"&#10074;&#10074; pause":"&#9654; play")+'</button>'+
+   '<button data-c="key stop">&#9632; stop</button><button data-c="ir ffwd">+10s</button><button data-c="mpd next">&#9197;</button></div>'+
+   '<div class="row"><button data-c="mpd random '+(m.random?0:1)+'" class="'+(m.random?"on":"")+'">shuffle</button>'+
+   '<button data-c="mpd repeat '+(m.repeat?0:1)+'" class="'+(m.repeat?"on":"")+'">repeat</button>'+
+   '<button data-c="mpd single '+(m.single?0:1)+'" class="'+(m.single?"on":"")+'">single</button>'+
+   '<button data-c="mpd consume '+(m.consume?0:1)+'" class="'+(m.consume?"on":"")+'">consume</button></div>';
+}
+
+/* the file format of CD rips (the unit keeps it); hidden while a rip runs */
+function ripFmt(){
+  const o=S.options||{}, fs=o.rip_formats||[];
+  if(!fs.length||S.rec.active) return "";
+  return '<div class="row"><span class="dim">rip as</span>'+fs.map(f=>'<button class="sm'+(f.name===o.rip_format?" on":"")+'" data-c="ripfmt '+f.name+'">'+esc(f.label)+'</button>').join("")+'</div>';
+}
+
+function recBtn(){
+  const rec=S.rec, n=S.input_name;
+  const can=(S.input>=3&&S.input<=8)||n==="cd"||n==="fm"||n==="dab";
+  if(!can) return "";
+  return '<div class="row"><button data-c="ir rec" class="'+(rec.active?"on":"")+'">'+(rec.active?"&#9632; stop recording":(n==="cd"?"&#9679; rip disc to HDD":"&#9679; record to HDD"))+'</button></div>'+(n==="cd"?ripFmt():"");
+}
+
+function renderPlayer(){
+  const m=S.mpd, t=S.tuner, cd=S.cd, n=S.input_name;
+  let h="";
+  if(n==="fm"||n==="dab"){
+    const dab=n==="dab", mhz=t.freq?(t.freq/100).toFixed(2)+" MHz":"";
+    h+='<div class="big">'+esc(dab?t.service:(t.ps||mhz))+'</div>';
+    if(dab) h+='<div class="dim">'+esc(t.ensemble)+'</div><div class="acc">'+esc(t.text)+'</div>';
+    else h+='<div class="dim">'+mhz+'</div><div class="acc">'+esc(t.rt)+'</div>';
+    h+='<div class="dim">'+esc(t.state)+(dab?' &middot; signal '+t.strength+'%'+(t.quality?'':' (sync lost)')+' &middot; '+(t.sel+1)+' of '+t.nsvc:' &middot; rssi '+t.rssi)+(t.time?' &middot; '+esc(t.time):'')+'</div>';
+    if(dab&&t.slide) h+='<img id="slide" alt="" src="/api/slide?'+t.slide+'">';
+    h+='<div class="row"><button data-c="ir prev">&#9198; prev</button><button data-c="ir next">next &#9197;</button></div>';
+  } else if(n==="cd"){
+    h+='<div class="big">'+esc(cd.album||"Audio CD")+'</div><div class="dim">'+(cd.active?'track '+cd.track+' &middot; '+fmt(cd.pos)+' / '+fmt(cd.len):(cd.tracks.length?cd.tracks.length+' tracks':esc(cd.err||"no disc")))+'</div>'+
+       '<div class="row"><button data-c="key ok">&#9654;/&#10074;&#10074;</button><button data-c="key stop">&#9632; stop</button></div>';
+  } else if(n==="pc usb"){
+    h+='<div class="big">PC USB</div><div class="dim">'+(S.hw.pcusb_cable?'cable connected':'no PC connected')+(S.hw.pcusb_selected?' &middot; routed to the PC port':' &middot; port not routed')+'</div>'+
+       '<p class="dim">Play from the computer; the volume of this unit applies.</p>';
+  } else if(S.input>=3&&S.input<=8){
+    h+='<div class="big">'+esc(lab(n))+'</div><div class="dim">'+(S.hw.spdif_rate&&S.input<=5?S.hw.spdif_rate+' Hz':'external input')+'</div>';
+  } else {
+    h+='<div class="big">'+esc(m.title||m.name||(m.file||"").split("/").pop()||"Nothing playing")+'</div>'+
+       '<div class="acc">'+esc(m.artist)+'</div><div class="dim">'+esc(m.album)+'</div>';
+    const p=m.duration>0?Math.min(100,100*m.elapsed/m.duration):0;
+    h+='<div class="bar" id="seekbar" data-d="'+m.duration+'"><div style="width:'+p+'%"></div></div>'+
+       '<div class="dim">'+fmt(m.elapsed)+(m.duration>0?' / '+fmt(m.duration):' live')+' &middot; '+esc(m.state)+' &middot; '+(m.length>0?(m.song+1)+' / '+m.length:'-')+(m.audio?' &middot; '+esc(m.audio):'')+(m.bitrate?' &middot; '+m.bitrate+' kbit/s':'')+'</div>'+
+       transport(m);
+  }
+  h+=recBtn();
+  return h;
+}
+
+function renderLibrary(){
+  /* rows of a disk (plain paths) can be queued, played and deleted; a radio station (@s|address) can be played;
+     folders of the network or the radio directory (@...) are only opened */
+  const acts = e => {
+    if(!e.path) return '';
+    if(e.path.startsWith("@s|")) return '<button class="sm" data-c="radio play '+esc(e.name.replace(/  \[.*$/,"").replace(/[|"]/g," "))+' | '+esc(e.path.slice(3))+'" title="play now">&#9654;</button>';
+    if(e.path[0]==="@") return '';
+    return '<button class="sm" data-c="lib add '+esc(e.path)+'" title="add to the queue">+</button>'+
+           '<button class="sm" data-c="lib play '+esc(e.path)+'" title="play now">&#9654;</button>'+
+           (e.path.indexOf('/')>0?'<button class="sm del" data-del="'+esc(e.path)+'" data-n="'+esc(e.name)+'" title="delete from the disk">&#128465;</button>':'');
+  };
+  const rows=S.browse.map((e,i)=>'<span class="nm">'+(e.dir?"&#128193; ":"&#9835; ")+esc(e.name)+'</span><span class="acts">'+acts(e)+'</span>');
+  return '<div class="row"><button data-c="lib up">&#8593; up</button><span class="dim">'+esc(S.dir_label||"/"+S.dir)+'</span>'+
+    '<button data-c="lib update" style="margin-left:auto">rescan</button></div>'+
+    (rows.length?list(rows,S.screen===1?S.browse_sel:-1):'<p class="dim">empty</p>');
+}
+async function delPath(p, n){
+  if(!confirm('Delete "'+n+'" from the disk?\nThis cannot be undone.')) return;
+  const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
+  try {
+    const r = await fetch("/api/library/delete",{method:"POST",body:p,headers:h});
+    const t = await r.text();
+    if(r.status===401){ const k=prompt("This unit needs an access token:"); if(k){try{localStorage.setItem(TOKEN_KEY,k);}catch(e){} delPath(p,n);} return; }
+    if(!r.ok) alert("Not deleted: "+t);
+  } catch(e){ alert("Not deleted: "+e); }
+  setTimeout(poll,800); setTimeout(poll,2500);
+}
+
+function renderCD(){
+  const cd=S.cd;
+  const rows=cd.tracks.map(t=>'<span class="nm">'+esc(String(t.n).padStart(2,"0")+" "+(t.title||"Track"))+'</span><span class="dim">'+(t.len<0?"data":fmt(t.len))+'</span>');
+  let h='<div class="row"><button data-c="key stop">&#9632; stop</button><button data-c="cd eject">&#9167; eject</button><button data-c="ir rec">&#9679; rip disc</button></div>'+ripFmt();
+  if(S.input_name!=="cd") h+='<p class="dim">Choose the CD input and put a disc in; it loads by itself.</p>';
+  h+='<div class="dim">'+esc(cd.album||cd.err||(S.input_name==="cd"?"no disc":""))+'</div>';
+  h+=rows.length?list(rows,cd.active?cd.track-1:cd.sel):"";
+  return h;
+}
+
+function renderTuner(){
+  const t=S.tuner, n=S.input_name;
+  if(n!=="fm"&&n!=="dab") return '<p class="dim">Choose the FM or DAB input first.</p>';
+  if(n==="dab"){
+    const rows=t.list.map(x=>'<span class="nm">'+esc(x.name)+'</span>');
+    return '<div class="row"><button data-c="tuner scan">scan for stations</button><span class="dim">'+esc(t.state)+(t.state==="scan"?" "+t.found+" found":"")+'</span></div>'+
+      (rows.length?list(rows,t.list_sel):'<p class="dim">No stations yet - scan.</p>');
+  }
+  const mhz=t.freq?(t.freq/100).toFixed(2):"--";
+  const rows=t.list.map(x=>'<span class="nm">'+esc(x.name)+'</span><span class="acts"><button class="sm del" data-c="tuner fmdel '+x.v+'" title="remove from the list">&#10005;</button></span>');
+  const inlist=t.list.some(x=>x.v===t.freq);
+  return '<div class="freq">'+mhz+' <span class="dim" style="font-size:18px">MHz</span></div>'+
+    '<div class="dim" style="text-align:center">'+esc(t.ps)+' '+esc(t.rt)+'</div>'+
+    '<div class="row" style="justify-content:center">'+
+      '<button data-c="tuner seek down">&#9664;&#9664; seek</button><button data-c="tuner step -10">-0.1</button><button data-c="tuner step -5">-0.05</button>'+
+      '<button data-c="tuner step 5">+0.05</button><button data-c="tuner step 10">+0.1</button><button data-c="tuner seek up">seek &#9654;&#9654;</button></div>'+
+    '<div class="row" style="justify-content:center"><input type="number" id="fmin" step="0.05" min="64" max="108" placeholder="98.30"> <button id="fmgo">tune</button>'+
+      '<button data-c="tuner fmadd"'+(inlist?' disabled':'')+'>+ add to list</button>'+
+      '<button data-c="tuner fmscan" class="'+(t.fmscan?"on":"")+'">'+(t.fmscan?"scanning...":"scan")+'</button></div>'+
+    '<div class="dim">'+esc(t.state)+' &middot; rssi '+t.rssi+' &middot; snr '+t.snr+'</div>'+
+    (rows.length?list(rows,t.list_sel):'<p class="dim">The list is empty - scan, or tune and add.</p>');
+}
+
+function renderInput(){
+  return list(S.inputs.map((n,i)=>'<span class="nm">'+esc(lab(n))+'</span>'+(i===S.input?'<span class="acc">&#9679;</span>':"")),-1);
+}
+
+/* ---------------------------------------------------------------- options */
+function trimRow(i,name,v,r){
+  return '<div class="row"><label>'+name+'</label><input type="range" class="trim" data-i="'+i+'" min="'+r[0]+'" max="'+r[1]+'" step="1" value="'+v+'"><span style="min-width:54px;text-align:right" id="tv'+i+'">'+(v>0?"+":"")+v+' dB</span></div>';
+}
+const balText = b => b ? (b < 0 ? "left " : "right ") + Math.abs(b) : "centre";
+function renderOptions(){
+  const o=S.options, bm=S.balance_max||24, bv=S.balance|0;
+  return '<h3>Output</h3>'+
+    '<div class="row"><label>Volume</label><button data-c="opt volume variable" class="'+(o.volume_fixed?"":"on")+'">variable</button><button data-c="opt volume fixed" class="'+(o.volume_fixed?"on":"")+'">fixed</button></div>'+
+    '<div class="row"><label>Balance</label><input type="range" id="bal" min="-'+bm+'" max="'+bm+'" step="1" value="'+bv+'"><span id="bal_v" style="min-width:64px;text-align:right">'+balText(bv)+'</span><button data-c="balance 0">centre</button></div>'+
+    '<div class="row"><label>RCA line out</label><button data-c="out lineout '+(o.lineout?0:1)+'" class="'+(o.lineout?"on":"")+'">'+(o.lineout?"on":"off")+'</button></div>'+
+    '<div class="row"><label>XLR out</label><button data-c="out xlr '+(o.xlr?0:1)+'" class="'+(o.xlr?"on":"")+'">'+(o.xlr?"on":"off")+'</button></div>'+
+    '<div class="row"><label>Headphone</label><span class="'+(S.hw.headphone?"ok":"dim")+'">'+(S.hw.headphone?"plugged in":"not plugged in")+' (automatic)</span></div>'+
+    '<h3 style="margin-top:16px">Input trim</h3>'+
+    trimRow(6,"line in",o.trim["line in"],o.trim_range)+trimRow(7,"aux in",o.trim["aux in"],o.trim_range)+trimRow(8,"phono",o.trim["phono"],o.trim_range)+
+    '<h3 style="margin-top:16px">Display</h3>'+
+    '<div class="row"><label>Brightness</label><input type="range" id="bl" min="2" max="'+S.brightness_max+'" value="'+S.brightness+'"><span id="bl_v" style="min-width:34px;text-align:right">'+S.brightness+'</span></div>';
+}
+
+/* ---------------------------------------------------------------- status helpers */
+function kv(rows){ return rows.map(([k,v])=>k===null?'<h4>'+esc(v)+'</h4>':'<span>'+esc(k)+'</span><span>'+v+'</span>').join(""); }
+const yn = (v,a,b) => v?'<span class="ok">'+(a||"yes")+'</span>':'<span class="dim">'+(b||"no")+'</span>';
+
+/* ---------------------------------------------------------------- favourites */
+let FAV = null, FAVMSG = "";
+async function favLoad(){
+  try{
+    const r = await fetch("/api/favourites", {cache:"no-store"});
+    if(r.ok){
+      FAV = (await r.text()).split("\n").filter(Boolean).map(l => { const i = l.indexOf("\t"); return {name:l.slice(0,i), url:l.slice(i+1)}; });
+      sigs.body = null; render();
+    }
+  }catch(e){}
+}
+async function favSave(msg){
+  const body = FAV.map(f => f.name.replace(/[\t\r\n|]/g," ").trim()+"\t"+f.url.trim()).join("\n")+"\n";
+  const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
+  try{
+    const r = await fetch("/api/favourites", {method:"POST", body, headers:h});
+    FAVMSG = r.ok ? (msg||"saved") : "could not save: "+(await r.text());
+  }catch(e){ FAVMSG = "could not save"; }
+  sigs.body = null; render();
+}
+const validUrl = u => /^https?:\/\/[^\s]+$/.test(u);
+const guessName = u => { try{ return new URL(u).hostname.replace(/^(www|stream|streams|live|listen|icecast)\./,""); }catch(e){ return "Station"; } };
+
+/* station search in the open radio-browser.info directory, queried by the browser itself */
+let RB = null, rbBusy = false;
+async function rbSearch(q){
+  rbBusy = true; RB = null; sigs.body = null; render();
+  const hosts = ["de1","de2","at1","nl1"];
+  for(const h of hosts){
+    try{
+      const r = await fetch("https://"+h+".api.radio-browser.info/json/stations/search?name="+encodeURIComponent(q)+"&limit=40&hidebroken=true&order=clickcount&reverse=true");
+      if(r.ok){ RB = (await r.json()).filter(s=>/^https?:\/\//.test(s.url_resolved||s.url) && /^(mp3|ogg|flac|opus)?$/i.test(s.codec||"") && !s.hls); break; }
+    }catch(e){}
+  }
+  if(RB===null) RB = [];
+  rbBusy = false; sigs.body = null; render();
+}
+function renderFavs(){
+  if(FAV === null){ favLoad(); return '<p class="dim">loading...</p>'; }
+  let h = '<p class="dim">The stations you keep. They show on the panel under Library &gt; Radio &gt; Favourites. MP3, Ogg and FLAC streams play; AAC does not.</p>';
+  h += FAV.length ? FAV.map((f,i) =>
+    '<div class="row favrow"><input type="text" class="fn" id="fn'+i+'" value="'+esc(f.name)+'" placeholder="name">'+
+    '<input type="text" class="fu" id="fu'+i+'" value="'+esc(f.url)+'" placeholder="stream address">'+
+    '<button class="sm" data-fp="'+i+'" title="play now">&#9654;</button>'+
+    '<button class="sm" data-fu="'+i+'" title="move up"'+(i?'':' disabled')+'>&uarr;</button>'+
+    '<button class="sm" data-fd="'+i+'" title="move down"'+(i<FAV.length-1?'':' disabled')+'>&darr;</button>'+
+    '<button class="sm del" data-fx="'+i+'" title="remove">&#10005;</button></div>').join("")
+    : '<p class="dim">No favourites yet. Add a stream below, or search for stations.</p>';
+  h += '<h3 style="margin-top:14px">Add a stream</h3><div class="row favrow"><input type="text" class="fn" id="fan" placeholder="name (optional)">'+
+    '<input type="text" class="fu" id="fau" placeholder="https://..."><button id="faadd">add</button></div>';
+  h += '<h3 style="margin-top:14px">Find stations</h3><div class="row"><input type="text" id="rbq" placeholder="search stations online" style="flex:1;width:auto"><button id="rbgo">search</button></div>';
+  if(rbBusy) h += '<p class="dim">searching...</p>';
+  else if(RB){
+    h += RB.length ? list(RB.map((s,i)=>'<span class="nm">'+esc(s.name)+' <span class="dim">'+esc([s.countrycode,s.codec,s.bitrate?s.bitrate+"k":""].filter(Boolean).join(" "))+'</span></span>'+
+      '<span class="acts"><button class="sm" data-rp="'+i+'" title="play now">&#9654;</button><button class="sm" data-ra="'+i+'" title="add to the favourites">+</button></span>'),-1)
+      : '<p class="dim">nothing found</p>';
+    h += '<div class="row"><button id="rbclr" class="sm">clear results</button></div>';
+  }
+  return h + '<p class="dim" id="favmsg">'+esc(FAVMSG)+'</p>';
+}
+function wireFavs(b){
+  const play = f => cmd("radio play "+(f.name||guessName(f.url)).replace(/[|"]/g," ").trim()+" | "+f.url);
+  b.querySelectorAll("[data-fp]").forEach(x=>x.onclick=e=>{ e.stopPropagation(); play(FAV[+x.dataset.fp]); });
+  b.querySelectorAll("[data-fx]").forEach(x=>x.onclick=e=>{ const i=+x.dataset.fx; if(confirm('Remove "'+FAV[i].name+'" from the favourites?')){ FAV.splice(i,1); favSave("removed"); } });
+  b.querySelectorAll("[data-fu]").forEach(x=>x.onclick=()=>{ const i=+x.dataset.fu; [FAV[i-1],FAV[i]]=[FAV[i],FAV[i-1]]; favSave("moved"); });
+  b.querySelectorAll("[data-fd]").forEach(x=>x.onclick=()=>{ const i=+x.dataset.fd; [FAV[i+1],FAV[i]]=[FAV[i],FAV[i+1]]; favSave("moved"); });
+  FAV.forEach((f,i)=>{
+    const n=$("fn"+i), u=$("fu"+i);
+    const commit=()=>{ const nv=n.value.trim(), uv=u.value.trim();
+      if(nv===f.name && uv===f.url) return;
+      if(!validUrl(uv)){ FAVMSG="the address must start with http:// or https://"; u.style.borderColor="var(--warn)"; $("favmsg").textContent=FAVMSG; return; }
+      f.name = nv || guessName(uv); f.url = uv; favSave("saved"); };
+    if(n) n.onchange=commit; if(u) u.onchange=commit;
+  });
+  const add=$("faadd"), fan=$("fan"), fau=$("fau");
+  if(add) add.onclick=()=>{ const u=fau.value.trim(); if(!validUrl(u)){ $("favmsg").textContent="the address must start with http:// or https://"; fau.style.borderColor="var(--warn)"; return; }
+    FAV.push({name:fan.value.trim()||guessName(u), url:u}); fau.value=""; fan.value=""; favSave("added"); };
+  if(fau) fau.onkeydown=e=>{ if(e.key==="Enter") add.click(); };
+  const q=$("rbq"), go=$("rbgo");
+  if(go) go.onclick=()=>{ if(q.value.trim()) rbSearch(q.value.trim()); };
+  if(q) q.onkeydown=e=>{ if(e.key==="Enter") go.click(); };
+  const first=b.querySelector("ul.list"); if(RB && RB.length && first) first.querySelectorAll("li").forEach(l=>l.onclick=null);
+  const clr=$("rbclr"); if(clr) clr.onclick=()=>{ RB=null; sigs.body=null; render(); };
+  const st = s => ({name:(s.name||"station").replace(/[|"]/g," ").trim(), url:(s.url_resolved||s.url)});
+  b.querySelectorAll("[data-rp]").forEach(x=>x.onclick=e=>{ e.stopPropagation(); play(st(RB[+x.dataset.rp])); });
+  b.querySelectorAll("[data-ra]").forEach(x=>x.onclick=e=>{ e.stopPropagation(); const f=st(RB[+x.dataset.ra]);
+    if(!FAV.some(y=>y.url===f.url)) FAV.push(f); x.textContent="ok"; favSave("added"); });
+}
+function renderStatus(){
+  const m=S.mpd,t=S.tuner,rows=[];
+  rows.push([null,"Playback"],["input",esc(lab(S.input_name))],["volume",S.volume_hidden?"fixed":S.volume+(S.muted?" (muted)":"")],["balance",balText(S.balance|0)],
+    ["player",esc(m.state)+(m.audio?" &middot; "+esc(m.audio):"")+(m.bitrate?" &middot; "+m.bitrate+" kbit/s":"")],["AirPlay",yn(S.air,"streaming","idle")],
+    ["recording",S.rec.active?'<span class="bad">'+(S.rec.cd?"ripping "+S.rec.track+"/"+S.rec.tracks:"recording "+fmt(S.rec.secs))+'</span>':"no"]);
+  if(m.error) rows.push(["player error",'<span class="bad">'+esc(m.error)+'</span>']);
+  rows.push([null,"Hardware"],["headphone",yn(S.hw.headphone,"plugged in","not plugged in")],["PC USB cable",yn(S.hw.pcusb_cable,"connected","not connected")],
+    ["PC USB routing",S.hw.pcusb_selected?"to the PC port":"to the unit"],["digital input rate",S.hw.spdif_rate?S.hw.spdif_rate+" Hz":"-"],
+    ["RCA out",yn(S.options.lineout,"on","off")],["XLR out",yn(S.options.xlr,"on","off")],["brightness",S.brightness+" / "+S.brightness_max]);
+  rows.push([null,"Tuner"],["module",t.running?esc(t.dab?"DAB+":"FM")+" &middot; "+esc(t.state):'<span class="bad">not running</span>'],
+    ["signal",t.running?(t.dab?"strength "+t.strength+"% &middot; "+(t.quality?"locked":"sync lost"):"rssi "+t.rssi+" &middot; snr "+t.snr):"-"],["stations",t.list.length]);
+  if(SYS){
+    rows.push([null,"System"],["uptime",Math.floor(SYS.uptime/3600)+" h "+Math.floor(SYS.uptime/60)%60+" min"],["load",SYS.load.join(" ")],
+      ["memory",SYS.mem_total-(SYS.mem_avail||SYS.mem_free)+" / "+SYS.mem_total+" MB used"],
+      ["temperature",SYS.temps.length?SYS.temps.map(x=>x+" &deg;C").join(", "):"-"],["CPU",SYS.cpu_mhz?SYS.cpu_mhz+" MHz":"-"],
+      ["kernel",esc(SYS.kernel)],["host",esc(SYS.hostname)]);
+    rows.push([null,"Network"]); SYS.net.forEach(n=>rows.push([n.if,esc(n.ip)+" &middot; "+esc(n.mac)+(n.speed>0?" &middot; "+n.speed+" Mbit/s":"")]));
+    rows.push([null,"Storage"]); SYS.disks.forEach(d=>rows.push([d.mount,(d.total_mb?Math.round(d.free_mb/1024*10)/10+" GB free of "+Math.round(d.total_mb/1024*10)/10+" GB":"-")+" &middot; "+esc(d.fs)+" &middot; "+(d.rw?"read/write":"read only")]));
+    rows.push([null,"Services"]); Object.keys(SYS.services).forEach(k=>rows.push([k,yn(SYS.services[k],"running","not running")]));
+    rows.push([null,"USB"]); SYS.usb.forEach(u=>rows.push([u.id,esc(u.name||"")+(u.id.startsWith("152a")?" (XMOS audio)":"")+" "+esc(u.port||"")]));
+  }
+  return '<div class="kv">'+kv(rows)+'</div><p class="dim">'+esc(S.status)+'</p>';
+}
+
+/* ---------------------------------------------------------------- page */
+function render(){
+  if(!S) return;
+  renderTabs();
+  $("h_in").textContent=lab(S.input_name); $("msg").textContent=S.status||"";
+  const r=$("h_rec"); r.style.display=S.rec.active?"":"none";
+  r.textContent=S.rec.cd?("RIP "+S.rec.track+"/"+S.rec.tracks):("REC "+fmt(S.rec.secs));
+  $("volsec").style.display = S.volume_hidden ? "none" : "";
+  if(!busy) $("vol").value=S.volume;
+  $("vol_v").textContent=S.volume; $("mute").className=S.muted?"on":"";
+  const b=$("body");
+  let html="", fn=null;
+  if(tab==="player") html=renderPlayer();
+  else if(tab==="library"){ html=renderLibrary(); fn=i=>cmd("screen 1\nsel "+i+"\nkey ok"); }
+  else if(tab==="favs"){ if($("body").querySelector("input:focus")) return; html=renderFavs(); }
+  else if(tab==="cd"){ html=renderCD(); fn=i=>cmd("screen 3\nsel "+i+"\nkey ok"); }
+  else if(tab==="tuner"){ html=renderTuner(); fn=i=>cmd("screen 4\nsel "+i+"\nkey ok"); }
+  else if(tab==="input"){ html=renderInput(); fn=i=>cmd("input "+i); }
+  else if(tab==="options"){
+    if(busy && $("body").querySelector("input.trim,#bl,#bal")) return;   /* don't rebuild under a dragged slider */
+    html=renderOptions();
+  }
+  else if(tab==="status") html=renderStatus();
+  else if(MODS[tab]){ if(MODS[tab].busy && MODS[tab].busy(b)) return; html=MODS[tab].render(); }
+  if(put(b,html)){
+    wire(b,fn);
+    if(MODS[tab] && MODS[tab].wire) MODS[tab].wire(b);
+    b.querySelectorAll("[data-del]").forEach(x=>x.onclick=e=>{ e.stopPropagation(); delPath(x.dataset.del,x.dataset.n); });
+    const sb=$("seekbar"); if(sb) sb.onclick=e=>{const r=sb.getBoundingClientRect(),d=+sb.dataset.d; if(d>0) cmd("mpd seekcur "+Math.floor(d*(e.clientX-r.left)/r.width));};
+    if(tab==="favs" && FAV) wireFavs(b);
+    const go=$("fmgo"), fi=$("fmin");
+    if(go) go.onclick=()=>{ const v=Math.round(parseFloat(fi.value)*100); if(v>=6400&&v<=10800) cmd("tuner tune "+v); else alert("Enter a frequency between 64.00 and 108.00 MHz"); };
+    if(fi) fi.onkeydown=e=>{ if(e.key==="Enter") go.click(); };
+    b.querySelectorAll("input.trim").forEach(x=>{
+      x.oninput=()=>{ busy=1; const v=+x.value; $("tv"+x.dataset.i).textContent=(v>0?"+":"")+v+" dB"; clearTimeout(x._t); x._t=setTimeout(()=>{cmd("trim "+x.dataset.i+" "+(v+12)); setTimeout(()=>{busy=0;sigs.body=null;},900);},150); };
+    });
+    const bal=$("bal"); if(bal) bal.oninput=()=>{ busy=1; $("bal_v").textContent=balText(+bal.value); clearTimeout(bal._t); bal._t=setTimeout(()=>{cmd("balance "+bal.value); setTimeout(()=>{busy=0;sigs.body=null;},900);},120); };
+    const bl=$("bl"); if(bl) bl.oninput=()=>{ busy=1; $("bl_v").textContent=bl.value; clearTimeout(bl._t); bl._t=setTimeout(()=>{cmd("bl "+bl.value); setTimeout(()=>{busy=0;sigs.body=null;},900);},120); };
+  }
+  /* the slideshow picture is updated in place so it does not flicker */
+  const sl=$("slide"); if(sl && S.tuner.slide && !sl.src.endsWith("?"+S.tuner.slide)) sl.src="/api/slide?"+S.tuner.slide;
+  if(tab==="status" && Date.now()-lastSys>4000) sysPoll();
+}
+async function sysPoll(){
+  lastSys=Date.now();
+  try{ const r=await fetch("/api/system",{cache:"no-store"}); if(r.ok){ SYS=await r.json(); sigs.body=null; render(); } }catch(e){}
+}
+async function poll(){
+  try{ const r=await fetch("/api/state",{cache:"no-store"}); if(r.ok){ S=await r.json(); render(); } }catch(e){}
+}
+
+(function(){
+  const el=$("vol");
+  el.onpointerdown=()=>busy=1;
+  el.oninput=()=>{busy=1;$("vol_v").textContent=el.value;clearTimeout(el._t);el._t=setTimeout(()=>{cmd("vol "+el.value);setTimeout(()=>busy=0,800);},120);};
+})();
+$("mute").onclick=()=>cmd("key mute");
+$("b_pwr").onclick=()=>{ if(confirm("Shut the unit down?")){ cmd("key power"); setTimeout(()=>cmd("key power"),600); } };
+/* the panel is a motion JPEG stream while the page is in view and "live" is ticked; otherwise one still picture */
+let shownMode = "";
+function shot(){
+  const want = $("live").checked && !document.hidden ? "stream" : "still";
+  if(want === shownMode) return;
+  shownMode = want;
+  $("scr").src = (want === "stream" ? "/api/stream.mjpg?" : "/api/screen.bmp?") + Date.now();
+}
+$("live").onchange = shot; document.addEventListener("visibilitychange", shot);
+poll(); setInterval(poll,1000); shot();
+</script>
+<!-- one line per tab module; each is a file in tabs/ -->
+<script src="tabs/wifi.js"></script>
+<script src="tabs/look.js"></script>
+<script src="tabs/files.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+--- a/src/decoder/plugins/FlacInput.cxx	2026-10-08 19:15:31.051547623 +0200
++++ b/src/decoder/plugins/FlacInput.cxx	2026-10-08 19:15:31.074986923 +0200
+@@ -46,6 +46,17 @@
+ inline FLAC__StreamDecoderSeekStatus
+ FlacInput::Seek(FLAC__uint64 absolute_byte_offset) noexcept
+ {
++	/* x45: a decoder that has been told to stop must not seek. libFLAC retries a half-read frame by seeking back;
++	 * over HTTP that is a new Range request, which a server that is busy streaming (foobar over UPnP) does not
++	 * answer, and AsyncInputStream::Seek() waits for it with no way out: the player thread waits for the decoder,
++	 * the main thread for the player, and every client of MPD with it, until the server lets go. */
++	if (client != nullptr) {
++		const auto cmd = client->GetCommand();
++
++		if (cmd != DecoderCommand::NONE && cmd != DecoderCommand::SEEK)
++			return FLAC__STREAM_DECODER_SEEK_STATUS_ERROR;
++	}
++
+ 	if (!input_stream.IsSeekable())
+ 		return FLAC__STREAM_DECODER_SEEK_STATUS_UNSUPPORTED;
+ 

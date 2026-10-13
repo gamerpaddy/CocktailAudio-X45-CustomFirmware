@@ -1,0 +1,27 @@
+#!/bin/sh
+# Run by shairport-sync (wait_for_completion = yes) before an AirPlay session
+# starts producing audio.
+#
+# The DAC can be opened by one source at a time: MPD must not be holding it, and
+# the XMOS master clock has to be on the family AirPlay uses. AirPlay is always
+# 44.1 kHz, so that is the 44.1k family. Starting an AirPlay stream is a
+# deliberate act, so it wins over whatever MPD was playing.
+
+ROOT=/home/root/x45new
+CARD=/proc/asound/card3/pcm0p/sub0/status
+
+: > /tmp/x45-airplay-active
+
+"$ROOT/bin/x45mpc" stop >/dev/null 2>&1
+
+# `stop` returns before MPD has closed its ALSA output. Wait (at most 5 s) until
+# the playback device reports closed, or shairport-sync would find it busy.
+n=0
+while [ $n -lt 50 ]; do
+	grep -q closed "$CARD" 2>/dev/null && break
+	sleep 0.1 2>/dev/null || sleep 1
+	n=$((n + 1))
+done
+
+"$ROOT/bin/x45ctl" clock 44100 >/dev/null 2>&1
+exit 0

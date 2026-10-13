@@ -1,0 +1,21 @@
+# build output and downloads (never committed)
+.build/
+dist/
+*.pkg
+*.pkg.sha256
+src/out/
+src/out_audit/
+*.o
+*.a
+
+# third party files the build downloads and puts into the source tree
+src/libx45/stb_image.h
+src/libx45/stb_truetype.h
+src/x45cd/a52/*
+!src/x45cd/a52/config.h
+
+# local settings and secrets must never be committed
+x45ui.conf
+*.key
+id_*
+*.pem

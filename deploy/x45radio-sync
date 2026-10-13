@@ -1,0 +1,79 @@
+#!/bin/sh
+# x45radio-sync - copies the internet-radio list from the FRITZ!Box media server
+# (UPnP/DLNA ContentDirectory, folder "Internetradio") into the RADIO screen's
+# station file.
+#
+# Only the block between the two marker lines in stations.txt is managed here;
+# everything else in the file is left alone. The box relays each stream under
+# http://<box>:49200/ST/AUDIO/DLNA-1-0/<host>/<path>; the real address is part of
+# that URL, so the direct one is stored and playback does not depend on the box.
+# If the box does not answer, the file is not touched.
+#
+#   x45radio-sync [http://fritz.box:49000]
+
+ROOT=/home/root/x45new
+FILE=$ROOT/etc/stations.txt
+BOX=${1:-http://fritz.box:49000}
+CTRL=$BOX/MediaServer/ContentDirectory/Control
+BEGIN="# --- fritzbox begin (managed by x45radio-sync, edits here are overwritten) ---"
+END="# --- fritzbox end ---"
+LOG=$ROOT/x45stack.log
+TMP=/tmp/x45radio-sync.$$
+
+browse() {
+	curl -s -m 15 -H 'Content-Type: text/xml; charset="utf-8"' \
+	  -H 'SOAPACTION: "urn:schemas-upnp-org:service:ContentDirectory:1#Browse"' \
+	  -d "<?xml version=\"1.0\"?><s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body><u:Browse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\"><ObjectID>$1</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag><Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>500</RequestedCount><SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>" \
+	  "$CTRL" | sed 's/&lt;/</g;s/&gt;/>/g;s/&quot;/"/g;s/&amp;/\&/g'
+}
+
+# entries of a folder, one per line:  container|id|title   or   item|title|url
+entries() {
+	browse "$1" | grep -oE '<(container|item) id="[^"]*"|<dc:title>[^<]*|<res [^>]*>[^<]*' | awk '
+		/^<container id=/ { split($0, a, "\""); kind = "container"; id = a[2]; next }
+		/^<item id=/      { kind = "item"; next }
+		/^<dc:title>/     { title = substr($0, 11); if (kind == "container") print "container|" id "|" title; next }
+		/^<res /          { if (kind == "item") { i = index($0, ">"); print "item|" title "|" substr($0, i + 1); kind = "" } }'
+}
+
+direct() {
+	echo "$1" | sed 's#^http://[^/]*:49200/ST/AUDIO/DLNA-1-0/#http://#'
+}
+
+root=$(browse 0 | grep -oE '<container id="[^"]*"|<dc:title>[^<]*' | awk '
+	/^<container id=/ { split($0, a, "\""); id = a[2]; next }
+	/^<dc:title>/     { if (substr($0, 11) == "Internetradio") { print id; exit } }')
+if [ -z "$root" ]; then
+	echo "x45radio-sync: no Internetradio folder on $BOX (box offline?)" >&2
+	exit 1
+fi
+
+: > "$TMP"
+entries "$root" | while IFS='|' read -r kind a b; do
+	if [ "$kind" = item ]; then
+		echo "$a | $(direct "$b")" >> "$TMP"
+	else
+		url=$(entries "$a" | grep '^item|' | head -n 1 | cut -d'|' -f3-)
+		[ -n "$url" ] && echo "$b | $(direct "$url")" >> "$TMP"
+	fi
+done
+
+n=$(wc -l < "$TMP")
+if [ "$n" -eq 0 ]; then
+	echo "x45radio-sync: the folder is empty or unreadable; stations.txt left alone" >&2
+	rm -f "$TMP"
+	exit 1
+fi
+
+touch "$FILE"
+{
+	awk -v b="$BEGIN" -v e="$END" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$FILE"
+	echo "$BEGIN"
+	cat "$TMP"
+	echo "$END"
+} > "$TMP.new"
+# written beside the file and renamed over it: a power cut or a save from the web page in between cannot leave half a list
+cat "$TMP.new" > "$FILE.sync" && mv "$FILE.sync" "$FILE"
+rm -f "$TMP" "$TMP.new"
+echo "$(date '+%F %T') x45radio-sync: $n stations from the FRITZ!Box" >> "$LOG"
+echo "x45radio-sync: $n stations"

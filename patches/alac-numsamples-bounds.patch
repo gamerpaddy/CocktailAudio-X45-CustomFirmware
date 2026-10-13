@@ -1,0 +1,22 @@
+--- a/codec/ALACDecoder.cpp	2026-10-03 15:14:24.341559125 +0200
++++ b/codec/ALACDecoder.cpp	2026-10-03 15:14:24.343159124 +0200
+@@ -251,6 +251,9 @@
+ 				{
+ 					numSamples  = BitBufferRead( bits, 16 ) << 16;
+ 					numSamples |= BitBufferRead( bits, 16 );
++					/* the count came off the network: it must fit the buffers, which are
++					   sized for frameLength (x45 patch; upstream wrote past them) */
++					RequireAction( numSamples <= mConfig.frameLength, status = kALAC_ParamError; goto Exit; );
+ 				}
+ 
+ 				if ( escapeFlag == 0 )
+@@ -402,6 +405,9 @@
+ 				{
+ 					numSamples  = BitBufferRead( bits, 16 ) << 16;
+ 					numSamples |= BitBufferRead( bits, 16 );
++					/* the count came off the network: it must fit the buffers, which are
++					   sized for frameLength (x45 patch; upstream wrote past them) */
++					RequireAction( numSamples <= mConfig.frameLength, status = kALAC_ParamError; goto Exit; );
+ 				}
+ 
+ 				if ( escapeFlag == 0 )

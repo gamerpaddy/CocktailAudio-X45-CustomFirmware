@@ -1,0 +1,93 @@
+#!/bin/sh
+#
+# /etc/init.d/x45new - start the x20 replacement at boot.
+#
+# Purely additive, in the same style as the sshd enablement: this file plus a
+# symlink in /etc/rc5.d. Nothing in the vendor rootfs is edited, and it does
+# nothing at all unless /home/root/x45new/ENABLED exists.
+#
+# To switch back to the vendor UI without removing anything:
+#     rm /home/root/x45new/ENABLED          (then reboot, or: /etc/init.d/x45new stop)
+# To remove it completely:
+#     /etc/init.d/x45new stop
+#     rm -f /etc/rc5.d/S98x45new /etc/init.d/x45new
+#
+# Boot-failure guard: every start increments /home/root/x45new/bootcount, and
+# the supervisor resets it to 0 once the UI has stayed up for 90 s. Three boots
+# in a row that never got that far disable the stack for this boot, so a broken
+# build can never lock the unit out of its own vendor UI: power-cycle it three
+# times and x20 comes back by itself.
+
+ROOT=/home/root/x45new
+PIDFILE=/var/run/x45stack.pid
+COUNT=$ROOT/bootcount
+LOG=$ROOT/x45stack.log
+MAX_BAD_BOOTS=3
+
+running() {
+	[ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+case "$1" in
+start)
+	[ -f "$ROOT/ENABLED" ] || exit 0
+	[ -x "$ROOT/bin/x45stack" ] || { echo "x45new: $ROOT/bin/x45stack missing"; exit 0; }
+	if running; then
+		echo "x45new already running (pid $(cat $PIDFILE))"
+		exit 0
+	fi
+	n=$(cat "$COUNT" 2>/dev/null || echo 0)
+	case "$n" in ''|*[!0-9]*) n=0 ;; esac
+	if [ "$n" -ge "$MAX_BAD_BOOTS" ]; then
+		echo "$(date '+%F %T') x45new: $n boots in a row never became healthy; NOT starting (vendor UI stays)" >> "$LOG"
+		echo "x45new: disabled by the boot-failure guard (bootcount=$n); remove $COUNT to retry"
+		exit 0
+	fi
+	echo $((n + 1)) > "$COUNT"
+	setsid "$ROOT/bin/x45stack" </dev/null >/dev/null 2>&1 &
+	echo "x45new started"
+	;;
+stop)
+	if running; then
+		kill "$(cat "$PIDFILE")" 2>/dev/null
+		echo "x45new stopped"
+	else
+		echo "x45new not running"
+	fi
+	;;
+restart)
+	"$0" stop
+	# the stack takes a few seconds to wind down (the UI ends its helpers politely); starting before the
+	# pid file is gone would answer "already running" and leave the unit without a UI
+	n=0
+	while running && [ $n -lt 40 ]; do
+		sleep 1
+		n=$((n + 1))
+	done
+	# the guard counts boots; a restart somebody asked for is not one (four of them in a row inside 90 s
+	# would otherwise leave the unit on the vendor UI)
+	echo 0 > "$COUNT"
+	"$0" start
+	;;
+ui-restart)
+	# a new x45ui is in place: it finishes politely and the supervisor starts it again (no stack restart,
+	# no vendor UI in between, no SIGKILL on a process that may be streaming to the DAC)
+	if pkill -USR1 -x x45ui; then
+		echo "x45ui restarting"
+	else
+		echo "x45ui not running"
+	fi
+	;;
+status)
+	if running; then
+		echo "x45new running (pid $(cat $PIDFILE)), bootcount=$(cat $COUNT 2>/dev/null)"
+	else
+		echo "x45new not running (ENABLED: $([ -f $ROOT/ENABLED ] && echo yes || echo no), bootcount=$(cat $COUNT 2>/dev/null))"
+	fi
+	;;
+*)
+	echo "usage: $0 {start|stop|restart|ui-restart|status}"
+	exit 1
+	;;
+esac
+exit 0

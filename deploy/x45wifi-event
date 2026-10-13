@@ -1,0 +1,23 @@
+#!/bin/sh
+# x45wifi-event - wpa_cli action hook: $1 is the interface, $2 the event (CONNECTED, DISCONNECTED,
+# TERMINATING). DHCP follows the link: a lease is asked for when it comes up and dropped when it goes.
+RUN=/var/run/x45wifi
+BIN=/home/root/x45new/bin
+IF=$1
+
+stop_dhcp() {
+	[ -f $RUN/udhcpc.pid ] && kill "$(cat $RUN/udhcpc.pid)" 2>/dev/null
+	rm -f $RUN/udhcpc.pid
+}
+
+case "$2" in
+CONNECTED)
+	stop_dhcp
+	udhcpc -i $IF -b -p $RUN/udhcpc.pid -s $BIN/x45wifi-dhcp -t 10 -T 3 -A 5 >/dev/null 2>&1
+	;;
+DISCONNECTED|TERMINATING)
+	stop_dhcp
+	ip addr flush dev $IF 2>/dev/null
+	;;
+esac
+exit 0

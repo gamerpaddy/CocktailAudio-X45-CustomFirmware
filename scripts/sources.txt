@@ -1,0 +1,77 @@
+# Everything the build downloads. Format: SHA256  file name  URL
+# Nothing in this list is shipped in this repository; scripts/fetch.py downloads it and refuses a file whose sum differs.
+
+# Toolchain and host build tools
+767c99155f74d5620cfd59d0224df2f82dec7ce58be24d702081dca9793408a9  armv7-eabihf--musl--stable-2021.11-1.tar.bz2  https://toolchains.bootlin.com/downloads/releases/toolchains/armv7-eabihf/tarballs/armv7-eabihf--musl--stable-2021.11-1.tar.bz2
+1b8aad738a5f6ae64294cc8eaba9a82988c1c420204484ac02ef782e5bba5f49  meson-1.4.1.tar.gz  https://github.com/mesonbuild/meson/releases/download/1.4.1/meson-1.4.1.tar.gz
+821bdff48a3f683bc4bb3b6f0b5fe7b2d647cf65d52aeb63328c91a6c6df285a  ninja-1.12.1.tar.gz  https://github.com/ninja-build/ninja/archive/refs/tags/v1.12.1.tar.gz
+b06ff63a83536aa8c2f6422fa80ad45e4833f590266feb14eaddfe1d4c853c69  pkgconf-2.2.0.tar.xz  https://distfiles.ariadne.space/pkgconf/pkgconf-2.2.0.tar.xz
+63aede5c6d33b6d9b13511cd0be2cac046f2e70fd0a07aa9573a04a82783af96  m4-1.4.19.tar.xz  https://ftp.gnu.org/gnu/m4/m4-1.4.19.tar.xz
+f14c83cfebcc9427f2c3cea7258bd90df972d92eb26752da4ddad81c87a0faa4  autoconf-2.71.tar.xz  https://ftp.gnu.org/gnu/autoconf/autoconf-2.71.tar.xz
+f01d58cd6d9d77fbdca9eb4bbd5ead1988228fdb73d6f7a201f5f8d6b118b469  automake-1.16.5.tar.xz  https://ftp.gnu.org/gnu/automake/automake-1.16.5.tar.xz
+4f7f217f057ce655ff22559ad221a0fd8ef84ad1fc5fcb6990cecc333aa1635d  libtool-2.4.7.tar.xz  https://ftp.gnu.org/gnu/libtool/libtool-2.4.7.tar.xz
+
+# MPD and its fmt wrap, boost headers
+550132239ad1acf82ccf8905b56cc13dc2c81a4489b96fba7731b3049907661a  mpd-0.23.15.tar.xz  https://www.musicpd.org/download/mpd/0.23/mpd-0.23.15.tar.xz
+6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e  boost_1_83_0.tar.bz2  https://archives.boost.io/release/1.83.0/source/boost_1_83_0.tar.bz2
+78b8c0a72b1c35e4443a7e308df52498252d1cefc2b08c9a97bc9ee6cfe61f8b  fmt-10.1.1.tar.gz  https://github.com/fmtlib/fmt/archive/10.1.1.tar.gz
+adec33acaf87c0859c52b242a44bc71c3427751da3f1adaed511f4186794a42f  fmt_10.1.1-1_patch.zip  https://wrapdb.mesonbuild.com/v2/fmt_10.1.1-1/get_patch
+
+# Audio libraries
+9f3f2f69b995f9ad37359072fbc69a3a88bfba081fc83e9be30e14662795bb4d  alsa-lib-1.2.11.tar.bz2  https://www.alsa-project.org/files/pub/lib/alsa-lib-1.2.11.tar.bz2
+c4d91be36fc8e54deae7575241e03f4211eb102afb3fc0775fbbc1b740016705  libogg-1.3.5.tar.xz  https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.xz
+6c58e69cd22348f441b861092b825e591d0b822e106de6eb0ee4d05d27205b70  flac-1.4.3.tar.xz  https://downloads.xiph.org/releases/flac/flac-1.4.3.tar.xz
+b33cc4934322bcbf6efcbacf49e3ca01aadbea4114ec9589d1b1e9d20f72954b  libvorbis-1.3.7.tar.xz  https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz
+c9b32b4253be5ae63d1ff16eea06b94b5f0f2951b7a02aceef58e3a3ce49c51f  opus-1.4.tar.gz  https://downloads.xiph.org/releases/opus/opus-1.4.tar.gz
+118d8601c12dd6a44f52423e68ca9083cc9f2bfe72da7a8c1acb22a80ae3550b  opusfile-0.12.tar.gz  https://downloads.xiph.org/releases/opus/opusfile-0.12.tar.gz
+3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e  libsndfile-1.2.2.tar.xz  https://github.com/libsndfile/libsndfile/releases/download/1.2.2/libsndfile-1.2.2.tar.xz
+bbfac3ed6bfbc2823d3775ebb931087371e142bb0e9bb1bee51a76a6e0078690  libmad-0.15.1b.tar.gz  https://deb.debian.org/debian/pool/main/libm/libmad/libmad_0.15.1b.orig.tar.gz
+63da4f6e7997278f8a3fef4c6a372d342f705051d1eeb6a46a86b03610e26151  libid3tag-0.15.1b.tar.gz  https://deb.debian.org/debian/pool/main/libi/libid3tag/libid3tag_0.15.1b.orig.tar.gz
+ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e  lame-3.100.tar.gz  https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz
+
+# Network libraries
+38ef96b8dfe510d42707d9c781877914792541133e1870841463bfa73f883e32  zlib-1.3.1.tar.xz  https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.xz
+8b54fb9bcf4d5a7078028e0520acddefb7900b3e66fec7f7175bb5b7d85ccdca  mbedtls-3.6.2.tar.bz2  https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.2/mbedtls-3.6.2.tar.bz2
+73a4b0e99596a09fa5924a4fb7e4b995a85fda0d18a2c02ab9cf134bebce04ee  curl-8.10.1.tar.xz  https://curl.se/download/curl-8.10.1.tar.xz
+a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505  cacert.pem  https://curl.se/ca/cacert.pem
+274db254a6979bde5aad404763a704956940e465843f2a9bd9ed7af22e2c0efc  expat-2.6.3.tar.xz  https://github.com/libexpat/libexpat/releases/download/R_2_6_3/expat-2.6.3.tar.xz
+
+# AirPlay receiver
+3173cc54d06f6186a04509947697b56c7eac09c48153d7dea5f702042620a2df  shairport-sync-4.3.4.tar.gz  https://github.com/mikebrady/shairport-sync/archive/refs/tags/4.3.4.tar.gz
+545166d6cac037744381d1e9cc5a5405094e7bfad16a411699bcff40bbb31ee7  libconfig-1.7.3.tar.gz  https://github.com/hyperrealm/libconfig/releases/download/v1.7.3/libconfig-1.7.3.tar.gz
+c25a4838fc8e4c1c8aacb8bd620edb3084a3d63bf8987fdad3ca2758c63240f9  popt-1.19.tar.gz  http://ftp.rpm.org/popt/releases/popt-1.x/popt-1.19.tar.gz
+f35e19628b4e5ad7f73a04c5b884fa85b0fe44ff99602209b9e6f2d13d9842c2  alac-5d8c5db.tar.gz  https://github.com/mikebrady/alac/archive/5d8c5db0dfcadd5872f28e665cf4f4303447352a.tar.gz
+
+# UPnP/DLNA renderer
+a502a7721dc0cf724670ad7dceccc30e331afd101da007f26e83e1fa9a0b2921  upmpdcli-1.8.18.tar.gz  https://www.lesbonscomptes.com/upmpdcli/downloads/upmpdcli-1.8.18.tar.gz
+fc7e253b63b21f5638c73f5940c67111ffc93e018e8c7acc4f51333d78616eed  libupnpp-0.26.8.tar.gz  https://www.lesbonscomptes.com/upmpdcli/downloads/libupnpp-0.26.8.tar.gz
+80c3d5adc388e59057be52c4c33d7708efe05318487c09e342e7a1f4a83aa792  libnpupnp-6.1.3.tar.gz  https://www.lesbonscomptes.com/upmpdcli/downloads/libnpupnp-6.1.3.tar.gz
+a89e09fc9b4de34dde19f4fcb4faaa1ce10299b9908db1132bbfa1de47882b94  libmicrohttpd-1.0.1.tar.gz  https://ftp.gnu.org/gnu/libmicrohttpd/libmicrohttpd-1.0.1.tar.gz
+f409856e5920c18d0c2fb85276e24ee607d2a09b5e7d5f0a371368903c275da2  jsoncpp-1.9.5.tar.gz  https://github.com/open-source-parsers/jsoncpp/archive/1.9.5.tar.gz
+eac15b82b5ba5ed0648af580221eb74657394f7fe768e966d9e9ebb27435429f  libmpdclient-2.22.tar.xz  https://www.musicpd.org/download/libmpdclient/2/libmpdclient-2.22.tar.xz
+
+# Spotify Connect receiver (Rust)
+0e4922997e1c67d27b3f50dcc388ecb8a3c08eba23b764879071f6e9e8c07ec7  librespot-0.8.0.tar.gz  https://github.com/librespot-org/librespot/archive/refs/tags/v0.8.0.tar.gz
+891c6366d7100feda0bca4c03ce63f3c9ac827cbebbc283e7433061d42c6a376  rust-1.99.0-x86_64-unknown-linux-gnu.tar.xz  https://static.rust-lang.org/dist/rust-1.99.0-x86_64-unknown-linux-gnu.tar.xz
+ed1fab318f03fef17217f54b0ef850c763d41deac7cd9ed2a8875cba69f7489d  rust-std-1.99.0-armv7-unknown-linux-musleabihf.tar.xz  https://static.rust-lang.org/dist/rust-std-1.99.0-armv7-unknown-linux-musleabihf.tar.xz
+
+# Wi-Fi userspace tools
+aed507004d728a5cf11eab48ca4bf9e6e1874444e33939b9d3dfed25018ee9bb  libnl-3.9.0.tar.gz  https://github.com/thom311/libnl/releases/download/libnl3_9_0/libnl-3.9.0.tar.gz
+3f2db22ad41c675242b98ae3942dbf3112548c60a42ff739210f2de4e98e4894  iw-6.9.tar.xz  https://mirrors.edge.kernel.org/pub/software/network/iw/iw-6.9.tar.xz
+912ea06f74e30a8e36fbb68064d6cdff218d8d591db0fc5d75dee6c81ac7fc0a  wpa_supplicant-2.11.tar.gz  https://w1.fi/releases/wpa_supplicant-2.11.tar.gz
+
+# Bluetooth (optional)
+ffaa41d741a8a3bee244ac8e54a72ea05bf2879663c098c82fc5757853441575  libusb-1.0.27.tar.bz2  https://github.com/libusb/libusb/releases/download/v1.0.27/libusb-1.0.27.tar.bz2
+ee0e9f666c6c965db1f50898707163a20790b7f805192d198fccbd2fbd5b8104  btstack-e385539.tar.gz  https://github.com/bluekitchen/btstack/archive/e38553977a25fb0b55b383c72c289be0975f422c.tar.gz
+c5c8c774dfae93aed71f8da7489e35159192135e4929591ea8a945b76deba6bd  aic-fmacfw_8800d80_h_u02.bin  https://raw.githubusercontent.com/radxa-pkg/aic8800/d13d07963cd15d731e2895e8288a04cca6152ac9/src/USB/driver_fw/fw/aic8800D80/fmacfw_8800d80_h_u02.bin
+23f2bed2ac0e8f7bda8f36df7defd30d9b928c97867f6f0f01f28d89dd78d670  aic-fmacfw_8800d80_u02.bin  https://raw.githubusercontent.com/radxa-pkg/aic8800/d13d07963cd15d731e2895e8288a04cca6152ac9/src/USB/driver_fw/fw/aic8800D80/fmacfw_8800d80_u02.bin
+a526cbd02fcdc495f049f3ad6b5933cb08cd984b16790c716a060d582fee1a56  aic-fw_adid_8800d80_u02.bin  https://raw.githubusercontent.com/radxa-pkg/aic8800/d13d07963cd15d731e2895e8288a04cca6152ac9/src/USB/driver_fw/fw/aic8800D80/fw_adid_8800d80_u02.bin
+f0e2f5bbc17bc327ca7f1574ff55370dfd863d931514347bb4abc18a74f6218f  aic-fw_patch_8800d80_u02.bin  https://raw.githubusercontent.com/radxa-pkg/aic8800/d13d07963cd15d731e2895e8288a04cca6152ac9/src/USB/driver_fw/fw/aic8800D80/fw_patch_8800d80_u02.bin
+ca738f5ea5aca6021c4f48b60ff35e835dfdaf072a8490e3ba8ba0a42440e3e5  aic-fw_patch_8800d80_u02_ext0.bin  https://raw.githubusercontent.com/radxa-pkg/aic8800/d13d07963cd15d731e2895e8288a04cca6152ac9/src/USB/driver_fw/fw/aic8800D80/fw_patch_8800d80_u02_ext0.bin
+9decb77435b7e9713e33e32da483d683b7329ed93b672b2d1b134031d7da5f67  aic-fw_patch_table_8800d80_u02.bin  https://raw.githubusercontent.com/radxa-pkg/aic8800/d13d07963cd15d731e2895e8288a04cca6152ac9/src/USB/driver_fw/fw/aic8800D80/fw_patch_table_8800d80_u02.bin
+
+# Panel: image and font code, UI font, Dolby Digital decoder
+594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3  stb_image.h  https://raw.githubusercontent.com/nothings/stb/013ac3beddff3dbffafd5177e7972067cd2b5083/stb_image.h
+ecd30b05e0dd4fea3a13c26810dd9e1992dc379049482c393d5a19e6b5090aab  stb_truetype.h  https://raw.githubusercontent.com/nothings/stb/6e9f34d5429cf16790ec43c9bac3f1ee4ad1f760/stb_truetype.h
+7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0  liberation-fonts-ttf-2.1.5.tar.gz  https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz
+a21d724ab3b3933330194353687df82c475b5dfb997513eef4c25de6c865ec33  a52dec-0.7.4.tar.gz  https://deb.debian.org/debian/pool/main/a/a52dec/a52dec_0.7.4.orig.tar.gz

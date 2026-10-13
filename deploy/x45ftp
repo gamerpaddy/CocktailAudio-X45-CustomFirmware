@@ -1,0 +1,113 @@
+#!/bin/sh
+# x45ftp - a short-lived FTP server for moving big files onto the unit.
+#
+#   x45ftp start [DIR] [MINUTES] [CLIENT_IP]   serve DIR (default: the staging folder up/) to ONE computer for MINUTES
+#                                              (default 60), then stop itself. CLIENT_IP defaults to the machine that
+#                                              ran this over ssh ($SSH_CLIENT); without either it refuses to start.
+#   x45ftp stop
+#   x45ftp status
+#
+# Why: ssh/scp to this unit moves ~0.7 MB/s; plain FTP does not have to wait for ssh. Why so strict: the server is
+# anonymous (vsftpd here has no PAM, so no logins) and can write, so it is limited three ways: only CLIENT_IP may connect
+# (xinetd only_from), only DIR is visible (chroot), and it closes itself. It never runs at boot.
+#
+# From the PC (curl ships with Windows 10 and Git):
+#   curl -T bigfile.dsf ftp://UNIT/            upload
+#   curl -C - -T bigfile.dsf ftp://UNIT/       resume an interrupted upload
+#   curl -l ftp://UNIT/                        list
+BIN=/home/root/x45new
+CONF=/tmp/x45ftp.conf
+XCONF=/tmp/x45ftp-xinetd.conf
+PIDF=/tmp/x45ftp.pid
+LOG=/tmp/x45ftp.log
+
+TOKF=/tmp/x45ftp.token   # names the session whose timer may stop the server
+
+stop() {
+	[ -f "$PIDF" ] && kill "$(cat "$PIDF")" 2>/dev/null
+	rm -f "$PIDF" "$TOKF"
+	killall vsftpd 2>/dev/null
+}
+
+case "$1" in
+start)
+	dir=${2:-$BIN/up}
+	mins=${3:-60}
+	client=${4:-${SSH_CLIENT%% *}}
+	[ -d "$dir" ] || { echo "x45ftp: no such folder: $dir" >&2; exit 1; }
+	[ -n "$client" ] || { echo "x45ftp: no client address (give CLIENT_IP): it will not serve everybody" >&2; exit 1; }
+	stop
+	mkdir -p /tmp/vsftpd
+	cat > "$CONF" <<EOF
+listen=NO
+anonymous_enable=YES
+no_anon_password=YES
+local_enable=NO
+write_enable=YES
+anon_upload_enable=YES
+anon_mkdir_write_enable=YES
+anon_other_write_enable=YES
+anon_umask=022
+anon_root=$dir
+secure_chroot_dir=/tmp/vsftpd
+pasv_enable=YES
+pasv_min_port=30000
+pasv_max_port=30010
+tcp_wrappers=NO
+seccomp_sandbox=NO
+idle_session_timeout=120
+data_connection_timeout=120
+xferlog_enable=YES
+xferlog_std_format=NO
+vsftpd_log_file=$LOG
+dirmessage_enable=NO
+EOF
+	cat > "$XCONF" <<EOF
+defaults
+{
+	log_type = FILE /tmp/x45ftp-xinetd.log
+	instances = 4
+}
+service ftp
+{
+	disable = no
+	socket_type = stream
+	protocol = tcp
+	wait = no
+	user = root
+	server = /usr/sbin/vsftpd
+	server_args = $CONF
+	only_from = $client
+	per_source = 3
+}
+EOF
+	xinetd -f "$XCONF" -pidfile "$PIDF" >/dev/null 2>&1 &
+	# close by itself: a forgotten server must not stay open. The timer of an earlier `start` must not cut a newer
+	# session short, so each session writes a token and only its own timer may stop the server.
+	tok="$$.$(date +%s)"
+	echo "$tok" > "$TOKF"
+	( sleep $((mins * 60)); [ "$(cat "$TOKF" 2>/dev/null)" = "$tok" ] && "$0" stop ) >/dev/null 2>&1 &
+	sleep 1
+	if netstat -tln | grep -q ':21 '; then
+		echo "x45ftp: serving $dir to $client on port 21 for $mins min (anonymous, read/write)"
+	else
+		echo "x45ftp: did not start; see /tmp/x45ftp-xinetd.log" >&2
+		exit 1
+	fi
+	;;
+stop)
+	stop
+	echo "x45ftp: stopped"
+	;;
+status)
+	if netstat -tln | grep -q ':21 '; then
+		echo "x45ftp: running"
+	else
+		echo "x45ftp: not running"
+	fi
+	;;
+*)
+	echo "usage: x45ftp start [DIR] [MINUTES] [CLIENT_IP] | stop | status" >&2
+	exit 2
+	;;
+esac

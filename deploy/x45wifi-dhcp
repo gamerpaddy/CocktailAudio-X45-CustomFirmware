@@ -1,0 +1,54 @@
+#!/bin/sh
+# x45wifi-dhcp - udhcpc script for the WiFi interface. The wired port stays the preferred way out:
+# whatever this adds carries a high metric, and the name servers are only taken over while eth0 has
+# no default route of its own.
+
+# network address of $1 (a.b.c.d) under the prefix length $2. The udhcpc environment has no "network" variable, and
+# a /24 is not a given (a /23 or /16 router): with the wrong address the route below would be refused. Octet by octet,
+# so it does not depend on the width of the shell's arithmetic.
+net_of() {
+	local_bits=$2
+	net_out=
+	OLDIFS=$IFS
+	IFS=.
+	set -- $1
+	IFS=$OLDIFS
+	for o in "$@"; do
+		if [ "$local_bits" -ge 8 ]; then
+			keep=255
+			local_bits=$((local_bits - 8))
+		elif [ "$local_bits" -gt 0 ]; then
+			keep=$(( (255 << (8 - local_bits)) & 255 ))
+			local_bits=0
+		else
+			keep=0
+		fi
+		net_out="$net_out${net_out:+.}$((o & keep))"
+	done
+	echo "$net_out"
+}
+
+case "$1" in
+deconfig)
+	ip addr flush dev $interface 2>/dev/null
+	;;
+bound|renew)
+	m=${mask:-24}
+	net=$(net_of "$ip" "$m")
+	ip addr flush dev $interface 2>/dev/null
+	ip addr add $ip/$m broadcast ${broadcast:-+} dev $interface
+	# the connected route comes with metric 0, the same as eth0's; make it the second choice
+	ip route del $net/$m dev $interface 2>/dev/null
+	ip route add $net/$m dev $interface metric 600
+	for r in $router; do
+		ip route add default via $r dev $interface metric 600 2>/dev/null
+	done
+	if ! ip route | grep -q '^default .* dev eth0'; then
+		{
+			[ -n "$domain" ] && echo "domain $domain"
+			for d in $dns; do echo "nameserver $d"; done
+		} > /var/run/resolv.conf.wifi && mv /var/run/resolv.conf.wifi /var/run/resolv.conf
+	fi
+	;;
+esac
+exit 0

@@ -1,0 +1,182 @@
+#!/bin/sh
+# x45media - mounts storage and exposes it to MPD.
+#
+# The vendor UI (x20) mounts the disks that are present at boot and does nothing
+# once it is paused for the replacement UI, and the udev mount hook in the rootfs
+# is a stub, so nothing picks up a drive plugged in later. This does:
+#
+#   * enables SATA hot-plug once (the kernel gives up on the internal port at
+#     ~6 s if no drive is spun up, and never looks again),
+#   * mounts every sd* partition that is not mounted, read-only (a music player
+#     never writes, and a disk pulled out while mounted is then harmless),
+#   * lazily unmounts what has been removed,
+#   * keeps $MEDIA/<name> symlinks to each mounted disk (its "My Music" folder if
+#     it has one) and to the built-in test folder: MPD's music directory,
+#   * tells MPD to rescan when that set changes.
+#
+#   x45media          run until killed (started by x45stack)
+#   x45media once     one pass, for testing
+
+ROOT=/home/root/x45new
+MEDIA=$ROOT/media
+BIN=$ROOT/bin
+LOG=$ROOT/x45stack.log
+FAILED=
+SIG=
+SATA_DONE=
+
+log() { echo "$(date '+%F %T') x45media: $*" >> "$LOG"; }
+
+mkdir -p "$MEDIA"
+
+# One instance only. Two of them race on the temp file below: one truncates it while the other reads it,
+# sees "no disk", deletes the library links and has MPD drop the whole database, a few seconds at a time.
+PIDF=/var/run/x45media.pid
+if [ "$1" != once ]; then
+	old=$(cat "$PIDF" 2>/dev/null)
+	if [ -n "$old" ] && [ "$old" != "$$" ] && kill -0 "$old" 2>/dev/null &&
+	   grep -q x45media "/proc/$old/cmdline" 2>/dev/null; then
+		exit 0
+	fi
+	echo $$ > "$PIDF"
+fi
+TMP=$MEDIA/.mounts.$$
+
+sata_enable() {
+	[ -n "$SATA_DONE" ] && return
+	SATA_DONE=1
+	[ -d /sys/module/ahci_imx ] || return
+	# a drive already found on the port is working: leave it alone
+	for b in /sys/block/sd*; do
+		[ -e "$b" ] && readlink -f "$b" | grep -q '/ata[0-9]' && return
+	done
+	[ "$(cat /sys/module/ahci_imx/parameters/hotplug 2>/dev/null)" = "Y" ] && return
+	echo 1 > /sys/module/ahci_imx/parameters/hotplug 2>/dev/null || return
+	echo 2200000.sata > /sys/bus/platform/drivers/ahci-imx/unbind 2>/dev/null
+	echo 2200000.sata > /sys/bus/platform/drivers/ahci-imx/bind 2>/dev/null
+	log "sata hot-plug enabled and the port re-probed"
+}
+
+# name -> directory name that is safe in a path
+clean() { echo "$1" | tr -c 'A-Za-z0-9._\n-' '_'; }
+
+mount_one() {
+	dev=$1
+	base=${dev#/dev/}
+	type=$(blkid -s TYPE -o value "$dev" 2>/dev/null)
+	[ -z "$type" ] && return 1
+	label=$(blkid -s LABEL -o value "$dev" 2>/dev/null)
+	if [ -z "$label" ]; then
+		# no label: the vendor firmware called such a disk HDD4, the next one HDD5 ... keep the names stable
+		n=4
+		while grep -q " /mnt/HDD$n " /proc/mounts; do n=$((n + 1)); done
+		label=HDD$n
+	fi
+	name=$(clean "$label")
+	[ -z "$name" ] && name=$base
+	[ -d "/mnt/$name" ] && grep -q " /mnt/$name " /proc/mounts && name=$base
+	mkdir -p "/mnt/$name"
+	case $type in
+	vfat)          mount -t vfat -o ro,noatime,utf8,shortname=mixed "$dev" "/mnt/$name" ;;
+	ntfs|exfat)    mount -t ufsd -o ro,noatime,nls=utf8 "$dev" "/mnt/$name" ;;
+	ext2|ext3|ext4) mount -t "$type" -o ro,noatime "$dev" "/mnt/$name" ;;
+	iso9660|udf|hfsplus) mount -t "$type" -o ro "$dev" "/mnt/$name" ;;
+	*)             mount -o ro "$dev" "/mnt/$name" ;;
+	esac
+	if [ $? -eq 0 ]; then
+		log "mounted $dev ($type) on /mnt/$name"
+		return 0
+	fi
+	rmdir "/mnt/$name" 2>/dev/null
+	log "could not mount $dev ($type)"
+	return 1
+}
+
+pass() {
+	# --- new partitions ---
+	# the vendor UI mounts the boot-time disks itself; while it runs, do not race it
+	x20=$(pidof x20)
+	if [ -n "$x20" ] && ! grep -q '^State:.*T' "/proc/${x20%% *}/status" 2>/dev/null; then
+		mounting=0
+	else
+		mounting=1
+	fi
+	for b in /sys/block/sd*; do
+		[ -e "$b" ] || continue
+		d=${b##*/}
+		parts=
+		for p in "$b/$d"*; do
+			[ -e "$p" ] && parts="$parts ${p##*/}"
+		done
+		[ -z "$parts" ] && parts=$d
+		for n in $parts; do
+			dev=/dev/$n
+			[ -b "$dev" ] || continue
+			grep -q "^$dev " /proc/mounts && continue
+			[ "$mounting" = 1 ] || continue
+			case " $FAILED " in *" $n "*) continue ;; esac
+			mount_one "$dev" || FAILED="$FAILED $n"
+		done
+	done
+
+	# --- removed devices: unmount, and forget failures for gone devices ---
+	grep '^/dev/sd' /proc/mounts | while read -r dev mp rest; do
+		if [ ! -b "$dev" ] || [ ! -e "/sys/block/$(echo "${dev#/dev/}" | sed 's/[0-9]*$//')" ]; then
+			umount -l "$mp" 2>/dev/null && log "unmounted $mp ($dev is gone)"
+			case $mp in /mnt/sd*|/mnt/[A-Za-z0-9]*) rmdir "$mp" 2>/dev/null ;; esac
+		fi
+	done
+	nf=
+	for n in $FAILED; do [ -b "/dev/$n" ] && nf="$nf $n"; done
+	FAILED=$nf
+
+	# --- read-only again ---
+	# The vendor UI mounts the disks it finds read-write, and does so again every time the stack falls back to it
+	# (a restart). A music player writes nothing, and a disk pulled out while mounted read-write is left dirty:
+	# put such a mount back, unless the vendor UI is running, a recording is being written or the panel is
+	# deleting (it holds /tmp/x45media.hold for that).
+	if [ -z "$(pidof x20)" ] && [ -z "$(pidof x45rec)" ] && [ ! -e /tmp/x45media.hold ]; then
+		grep '^/dev/sd' /proc/mounts | while read -r dev mp fs opts rest; do
+			case $opts in
+			rw|rw,*) mount -o remount,ro "$mp" >/dev/null 2>&1 && log "$mp back to read-only" ;;
+			esac
+		done
+	fi
+
+	# --- links for MPD ---
+	new=
+	grep '^/dev/sd' /proc/mounts | while read -r dev mp rest; do
+		echo "$mp"
+	done > "$TMP"
+	while read -r mp; do
+		[ -z "$mp" ] && continue
+		name=${mp##*/}
+		tgt=$mp
+		[ -d "$mp/My Music" ] && tgt="$mp/My Music"
+		ln -sfn "$tgt" "$MEDIA/$name"
+		new="$new $name"
+	done < "$TMP"
+	rm -f "$TMP"
+	# the internal flash never holds music: it is not part of the library
+	# drop links whose disk is gone
+	for l in "$MEDIA"/*; do
+		[ -L "$l" ] || continue
+		n=${l##*/}
+		case " $new " in *" $n "*) ;; *) rm -f "$l" ;; esac
+	done
+	if [ "$new" != "$SIG" ]; then
+		[ -n "$SIG" ] && "$BIN/x45mpc" update >/dev/null 2>&1
+		SIG=$new
+		log "media: $new"
+	fi
+}
+
+sata_enable
+if [ "$1" = once ]; then
+	pass
+	exit 0
+fi
+while true; do
+	pass
+	sleep 3
+done

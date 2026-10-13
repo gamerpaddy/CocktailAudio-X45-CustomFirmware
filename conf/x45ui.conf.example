@@ -1,0 +1,30 @@
+# x45ui settings. `key = value`, # starts a comment. Changes apply the next time
+# the UI starts: /etc/init.d/x45new restart
+
+# Volume knob and scroll wheel direction. The knob is a quadrature encoder; the
+# polarity below was derived from a recording of the lines plus the usual
+# convention that A leads B on a clockwise turn, NOT from watching which way a
+# hand turned it. If clockwise lowers the volume (or scrolls up), set this to 0.
+knob_invert = 1
+
+# Quadrature edges per click of the knob (1..16). A mechanical encoder usually
+# makes one full 4-edge cycle per detent. If one click moves the volume by 2 or
+# more steps, raise this; if it takes two clicks to move one step, lower it.
+knob_edges = 4
+
+# Line-out volume stage. `variable` (default): the knob sets the level. `fixed`:
+# the unit's own volume is bypassed, for use behind an external preamp.
+#volume_mode = variable
+
+# Analogue input gain (line-in, aux, phono), 0..21 = -12..+9 dB; 12 = 0 dB.
+# Raise it if a source is too quiet at full volume.
+#input_trim = 12
+
+# `off` hides the FM/DAB inputs on units without a radio module. Without this the
+# FM/DAB screens report "no radio module answers" by themselves.
+#tuner = on
+
+# Password for MPD. When set, x45stack puts it in mpd.conf and hands it to the
+# panel, x45mpc and the UPnP renderer; network clients (phone apps) need it too.
+# No quotes or backslashes. Takes effect after: /etc/init.d/x45new restart
+#mpd_password = 

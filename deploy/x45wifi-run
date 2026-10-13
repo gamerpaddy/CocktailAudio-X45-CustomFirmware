@@ -1,0 +1,106 @@
+#!/bin/sh
+# x45wifi-run - the WiFi side of the USB radio stick: brings the stick up (shared with Bluetooth),
+# loads the driver, and runs wpa_supplicant on wlan0 with a wpa_cli event hook that does DHCP.
+#
+#   x45wifi-run start    bring everything up (idempotent)
+#   x45wifi-run stop     wpa_supplicant and DHCP down, wlan0 down (the driver stays loaded)
+#   x45wifi-run boot     start, but only when WiFi is switched on (wifi/state/enabled); used by x45stack
+#   x45wifi-run on|off   switch WiFi on/off persistently (the enabled flag) and start/stop it
+#   x45wifi-run status   print the status file
+#
+# The networks (with their passphrases) live in wifi/state/wpa.conf, outside everything the package
+# carries. Progress and failures go to /tmp/x45wifi.status, which the panel and the web page read
+# while wpa_supplicant is not up yet; once it is, they talk to its control socket directly.
+ROOT=/home/root/x45new
+BIN=$ROOT/bin
+BT=$ROOT/bt
+W=$ROOT/wifi
+STATE=$W/state
+CONF=$STATE/wpa.conf
+RUN=/var/run/x45wifi
+IF=wlan0
+ST=/tmp/x45wifi.status
+N=2000000
+
+status() {	# state, step
+	N=$((N + 1))
+	printf 'seq=%s\nstate=%s\nstep=%s\n' $N "$1" "$2" > $ST.tmp && mv $ST.tmp $ST
+}
+fail() {
+	N=$((N + 1))
+	printf 'seq=%s\nstate=error\nerror=%s\n' $N "$1" > $ST.tmp && mv $ST.tmp $ST
+	exit 1
+}
+. $ROOT/lib/sh/x45radio.sh
+
+alive() {	# pidfile $1 names a running process
+	[ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null
+}
+
+do_start() {
+	exec 9> /tmp/x45wifi.lock
+	flock 9
+	mkdir -p $RUN $STATE
+	chmod 700 $STATE
+	if alive $RUN/wpa.pid && [ -S $RUN/$IF ]; then
+		status ready ""
+		return 0
+	fi
+	status starting "looking for the radio stick"
+	radio_up
+	if ! lsmod | grep -q '^aic8800_fdrv'; then
+		status starting "loading the driver"
+		lsmod | grep -q '^x45_aicbsp' || insmod $W/mod/x45_aicbsp.ko fw_path=$W/fw || fail "driver helper would not load"
+		insmod $W/mod/aic8800_fdrv.ko || fail "WiFi driver would not load"
+	fi
+	n=0
+	while [ ! -d /sys/class/net/$IF ] && [ $n -lt 40 ]; do
+		sleep 0.5
+		n=$((n + 1))
+	done
+	[ -d /sys/class/net/$IF ] || fail "no $IF after loading the driver"
+	# two interfaces on one subnet (eth0 and wlan0): a reverse-path check would drop what arrives on
+	# wlan0 while the preferred route is eth0, and ARP must only answer for the interface's own address
+	sysctl -w net.ipv4.conf.all.rp_filter=0 net.ipv4.conf.$IF.rp_filter=0 \
+		net.ipv4.conf.all.arp_ignore=1 net.ipv4.conf.all.arp_announce=2 \
+		net.ipv4.conf.$IF.arp_ignore=1 net.ipv4.conf.$IF.arp_announce=2 >/dev/null 2>&1
+	if [ ! -f $CONF ]; then
+		( umask 077; printf 'ctrl_interface=DIR=%s\nupdate_config=1\nap_scan=1\n' $RUN > $CONF )
+	fi
+	status starting "starting wpa_supplicant"
+	pkill -x wpa_supplicant 2>/dev/null
+	rm -f $RUN/$IF
+	ip link set $IF up
+	# the daemons must not inherit the lock (fd 9), or the next x45wifi-run waits for them to exit
+	$BIN/wpa_supplicant -B -Dnl80211 -i$IF -c $CONF -P $RUN/wpa.pid -f $RUN/wpa.log 9>&- || fail "wpa_supplicant would not start"
+	n=0
+	while [ ! -S $RUN/$IF ] && [ $n -lt 20 ]; do
+		sleep 0.5
+		n=$((n + 1))
+	done
+	[ -S $RUN/$IF ] || fail "wpa_supplicant has no control socket"
+	pkill -x wpa_cli 2>/dev/null
+	$BIN/wpa_cli -B -a $BIN/x45wifi-event -i $IF -p $RUN -P $RUN/cli.pid >/dev/null 2>&1 9>&-
+	status ready ""
+}
+
+do_stop() {
+	pkill -x wpa_cli 2>/dev/null
+	[ -f $RUN/udhcpc.pid ] && kill "$(cat $RUN/udhcpc.pid)" 2>/dev/null
+	pkill -x wpa_supplicant 2>/dev/null
+	sleep 1
+	ip addr flush dev $IF 2>/dev/null
+	ip link set $IF down 2>/dev/null
+	rm -f $RUN/udhcpc.pid $RUN/wpa.pid $RUN/$IF
+	status off ""
+}
+
+case "$1" in
+start)	do_start ;;
+stop)	do_stop ;;
+boot)	[ -f $STATE/enabled ] && do_start ;;
+on)	mkdir -p $STATE; touch $STATE/enabled; do_start ;;
+off)	rm -f $STATE/enabled; do_stop ;;
+status)	cat $ST 2>/dev/null || echo "state=off" ;;
+*)	echo "usage: x45wifi-run start|stop|boot|on|off|status" >&2; exit 2 ;;
+esac

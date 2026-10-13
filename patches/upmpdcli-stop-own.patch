@@ -1,0 +1,98 @@
+X45 patch for upmpdcli 1.8.18: the UPnP Stop actions leave playback alone when the song that plays is not one
+this client queued (the panel or the web page replaced the queue after the control point started it).
+Apply from the upmpdcli source root: patch -p1 < upmpdcli-stop-own.patch
+
+--- a/src/mpdcli.cxx	2026-10-09 23:07:06.056833975 +0200
++++ b/src/mpdcli.cxx	2026-10-09 23:07:06.057539575 +0200
+@@ -845,6 +845,18 @@
+     return true;
+ }
+ 
++bool MPDCli::stopOwn()
++{
++    std::unique_lock<std::mutex> lock(m_mutex);
++    updStatus();
++    if (!m_ownids.empty() && m_stat.songid >= 0 && !m_ownids.count(m_stat.songid)) {
++        LOGDEB("MPDCli::stopOwn: the song that plays is not ours, left alone\n");
++        return true;
++    }
++    RETRY_CMD(mpd_run_stop(m_conn), false);
++    return true;
++}
++
+ bool MPDCli::seek(int seconds)
+ {
+     std::unique_lock<std::mutex> lock(m_mutex);
+@@ -993,6 +1005,12 @@
+     if (m_have_addtagid)
+         send_tag_data(m_lastinsertid, meta);
+ 
++    if (m_lastinsertid != -1) {   // X45: remembered for stopOwn
++        if (m_ownids.size() >= 256)
++            m_ownids.erase(m_ownids.begin());
++        m_ownids.insert(m_lastinsertid);
++    }
++
+     m_lastinsertpos = pos;
+     updStatus();
+     m_lastinsertqvers = m_stat.qvers;
+--- a/src/mpdcli.hxx	2026-10-09 23:07:06.058317175 +0200
++++ b/src/mpdcli.hxx	2026-10-09 23:07:06.058925775 +0200
+@@ -28,6 +28,7 @@
+ #include <mutex>
+ #include <condition_variable>
+ #include <atomic>
++#include <set>
+ 
+ #include "upmpdutils.hxx"
+ 
+@@ -90,6 +91,10 @@
+     bool play(int pos = -1);
+     bool playId(int id = -1);
+     bool stop();
++    // X45: the stop of the UPnP Stop actions. Does nothing when the song that plays is not one of ours (the panel
++    // or the web page replaced the queue after the control point started it); a stop from the control point must
++    // not end what the owner chose on the unit.
++    bool stopOwn();
+     bool next();
+     bool previous();
+     bool repeat(bool on);
+@@ -194,6 +199,8 @@
+     int m_lastinsertid{-1};
+     int m_lastinsertpos{-1};
+     int m_lastinsertqvers{-1};
++    // X45: the queue ids this client added (stopOwn)
++    std::set<int> m_ownids;
+ 
+     bool openconn();
+     void closeconn();
+--- a/src/avtransport.cxx	2026-10-09 23:07:06.059599975 +0200
++++ b/src/avtransport.cxx	2026-10-09 23:07:06.060243075 +0200
+@@ -600,14 +600,14 @@
+     switch (mpds.state) {
+     case MpdStatus::MPDS_PLAY: 
+         switch (what) {
+-        case 0: ok = m_dev->getmpdcli()->stop(); break;
++        case 0: ok = m_dev->getmpdcli()->stopOwn(); break;
+         case 1: ok = m_dev->getmpdcli()->play();break;
+         case 2: ok = m_dev->getmpdcli()->togglePause();break;
+         }
+         break;
+     case MpdStatus::MPDS_PAUSE:
+         switch (what) {
+-        case 0: ok = m_dev->getmpdcli()->stop(); break;
++        case 0: ok = m_dev->getmpdcli()->stopOwn(); break;
+         case 1: ok = m_dev->getmpdcli()->togglePause();break;
+         case 2: break;
+         }
+--- a/src/ohplaylist.cxx	2026-10-09 23:07:06.060899875 +0200
++++ b/src/ohplaylist.cxx	2026-10-09 23:07:06.061628175 +0200
+@@ -369,7 +369,7 @@
+ 
+ int OHPlaylist::iStop()
+ {
+-    bool ok = m_dev->getmpdcli()->stop();
++    bool ok = m_dev->getmpdcli()->stopOwn();
+     return ok ? UPNP_E_SUCCESS : UPNP_E_INTERNAL_ERROR;
+ }
+ int OHPlaylist::stop(const SoapIncoming& sc, SoapOutgoing& data)

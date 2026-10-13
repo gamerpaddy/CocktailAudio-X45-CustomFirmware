@@ -1,0 +1,21 @@
+# Internet radio presets for x45ui's RADIO screen.
+#
+# One station per line:   Name | stream URL
+# Lines starting with # and blank lines are ignored. Edit this file on the
+# device (/home/root/x45new/etc/stations.txt) - the installer never overwrites
+# an existing copy. Plain http:// and https:// streams work (TLS is built in,
+# with a current CA bundle in /home/root/x45new/etc/ssl). Formats: MP3 and
+# FLAC streams; AAC/HLS (.m3u8) streams are not supported by this MPD build.
+#
+# Every entry below was played from the unit itself before it was listed.
+
+SomaFM Groove Salad | https://ice1.somafm.com/groovesalad-128-mp3
+SomaFM Drone Zone | https://ice1.somafm.com/dronezone-128-mp3
+SomaFM Secret Agent | https://ice1.somafm.com/secretagent-128-mp3
+SomaFM Lush | https://ice1.somafm.com/lush-128-mp3
+Radio Paradise (MP3 320) | https://stream.radioparadise.com/mp3-320
+Radio Paradise (FLAC, lossless) | https://stream.radioparadise.com/flac
+Radio Swiss Jazz | http://stream.srg-ssr.ch/m/rsj/mp3_128
+Radio Swiss Classic | http://stream.srg-ssr.ch/m/rsc_de/mp3_128
+Deutschlandfunk | https://st01.sslstream.dlf.de/dlf/01/128/mp3/stream.mp3
+Deutschlandfunk Kultur | https://st02.sslstream.dlf.de/dlf/02/128/mp3/stream.mp3

@@ -1,0 +1,42 @@
+Select the X45's XMOS master-clock family before the ALSA PCM opens.
+
+FS_4844 (GPIO1.7, written through /proc/x45/gpio) picks the 44.1 kHz or 48 kHz
+clock family. Nothing in the vendor kernel driver sets it, so a stream in the
+other family plays at the wrong speed: measured from the USB feedback endpoint,
+96 kHz came out at 88.2 kHz (8.1 % slow). x45_clock_select() comes from
+libx45clock.a (src/libx45/x45clock.c). On any other machine /proc/x45/gpio does
+not exist, the call fails with -ENOENT, and the failure is only logged at debug
+level, so the patch is inert there.
+
+--- a/src/output/plugins/AlsaOutputPlugin.cxx
++++ b/src/output/plugins/AlsaOutputPlugin.cxx
+@@ -43,6 +43,10 @@
+ #include "event/Call.hxx"
+ #include "Log.hxx"
+ 
++/* X45 only: libx45clock.a. Picks the XMOS master-clock family (44.1k or 48k)
++ * for `rate`; must run before the PCM is opened. */
++extern "C" int x45_clock_select(unsigned rate);
++
+ #ifdef ENABLE_DSD
+ #include "util/AllocatedArray.hxx"
+ #endif
+@@ -805,6 +809,18 @@
+ 		}
+ 	}
+ 
++	{
++		const int clk = x45_clock_select(audio_format.sample_rate);
++		if (clk < 0)
++			FmtDebug(alsa_output_domain,
++				 "master clock not selected for {} Hz (errno {})",
++				 audio_format.sample_rate, -clk);
++		else
++			FmtDebug(alsa_output_domain,
++				 "master clock family selected for {} Hz",
++				 audio_format.sample_rate);
++	}
++
+ 	int err = snd_pcm_open(&pcm, GetDevice(),
+ 			       SND_PCM_STREAM_PLAYBACK, mode);
+ 	if (err < 0)

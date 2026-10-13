@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run by shairport-sync after an AirPlay session ends. See x45-airplay-begin.
+rm -f /tmp/x45-airplay-active
+exit 0
