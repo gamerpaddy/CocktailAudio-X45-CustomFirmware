@@ -54,8 +54,9 @@ see [Quick start](#quick-start).
   INPUT opens the choice, and an option switches to the highlighted input after a few seconds without a key press.
 - Network input plays through MPD: files on USB sticks and SATA disks, UPnP/DLNA servers on your network, and
   internet radio. Formats are the ones MPD knows (FLAC, MP3, Ogg Vorbis, Opus, WAV, DSD and more).
-- High rates: PCM up to 192 kHz and 384 kHz WAV files, DSD64 and DSD128 sent to the DAC as DSD, DSD256 converted to
-  352.8 kHz PCM.
+- Artwork of what plays: the cover of a library track, the logo of a radio station, the cover of the current song on
+  internet radio. Switchable in the display options (off, library only, library and internet; the internet mode sends
+  artist, title and station name to iTunes and radio-browser.info).
 - PC USB: the unit shows up as a USB sound card on your computer.
 - Volume mode fixed or variable, balance, a trim for each analog input, RCA and XLR outputs switchable.
 - Resume: the unit comes back on the input and the radio station it was left on.
@@ -73,8 +74,13 @@ see [Quick start](#quick-start).
 - AirPlay (classic AirPlay, from iPhone, iPad and Mac).
 - UPnP/DLNA renderer: the unit appears in control apps and plays what they send, at the stream's own rate.
 - Spotify Connect (needs a Premium account).
-- Bluetooth A2DP sink (SBC), with pairing on the panel. Needs one specific kind of USB Bluetooth stick, see
+- Bluetooth input: the unit is an A2DP sink (SBC) for your phone, with pairing on the panel.
+- Bluetooth output: the unit sends its sound to a headset or speaker (A2DP, SBC). Pair it from the panel; it connects
+  again by itself, mutes the main outputs while it is connected, and gives them back when the headset goes away.
+- Both Bluetooth functions need one specific kind of USB Bluetooth stick, see
   [docs/X45-BLUETOOTH.md](docs/X45-BLUETOOTH.md).
+- Wi-Fi with a supported USB stick (WPA2): scan, join, forget and auto-join on the panel with an on-screen keyboard,
+  and in the web interface. The Ethernet port keeps priority.
 
 ### CD, DVD and recording
 
@@ -129,33 +135,34 @@ Built, but not proven:
 
 - **Spotify Connect** is built and started with the other services. The last real test with a phone and a Premium
   account is still open.
-- **DSD256** is converted to PCM inside MPD. It was verified against a reference conversion on a PC and measured for
-  load on the unit, but not listened to through the DAC for long.
 - **Video DVD sound and HDCD** were added recently and have had little listening time.
 - **Digital inputs** (coaxial, optical, AES/EBU) are implemented, but not every sample rate was tested.
+- **Artwork** was tested with internet radio (song covers and station logos). Covers from local files and the
+  "library only" mode have not been tried yet.
 - The unit was tested with one firmware version of the original software. Other versions are untested.
 
-Not working yet:
+Not done yet:
 
-- **Wi-Fi.** The panel screens, the tools (`wpa_supplicant`, `iw`) and the web tab are in the package. The kernel
-  driver for the supported USB Wi-Fi stick has to be built against the unit's own kernel, which the automated build
-  does not do, so Wi-Fi does not work with a package you build yourself. Use the Ethernet port.
-- **Bluetooth** works only with one kind of USB stick (an AIC8800D80 "WiFi 6" stick that first shows up as a small
-  disk). It is an A2DP sink for SBC only. No aptX or LDAC, no Bluetooth LE, and the unit cannot send to a speaker.
+- **The build scripts lag behind the unit.** Wi-Fi, Bluetooth output and artwork work on the unit this was developed
+  on, but the scripts here do not build everything for them yet. The kernel driver for the Wi-Fi stick has to be
+  built against the unit's own kernel, which the automated build does not do, so a package built from these scripts
+  has the Wi-Fi tools, screens and web tab but not the driver. The artwork helper and the Bluetooth output daemon are
+  not part of the build scripts yet either. Until that is done, use the Ethernet port.
+- **SSH.** The unit has an SSH server, and it works, but the package does not switch it on for you.
+- **HDMI output.** The unit has the port, and the panel is drawn on the built-in display only. Nobody has written
+  the HDMI output yet.
+- **Bluetooth** details: SBC only (no aptX or LDAC), no Bluetooth LE, and only one kind of USB stick is supported.
 - **AirPlay 2** is not built. Classic AirPlay works.
-- **Cover art** is not shown on the panel yet.
-- The panel has no setting yet to choose between native DSD and PCM.
-
-Will never work:
-
 - **Tidal, Qobuz, Deezer, Roon, Amazon Music and the other streaming services inside the unit.** The original
-  firmware used keys and SDKs that belong to the maker of the unit. They are not in this project and will not be.
+  firmware used keys and SDKs that belong to the maker of the unit and the services. They are not in this project.
   Play them from the phone through AirPlay, Bluetooth, Spotify Connect or a UPnP control app instead.
   [docs/X45-STREAMING.md](docs/X45-STREAMING.md) has the details.
-- **HDMI output.** The panel is drawn on the built-in display only.
-- **SSH.** The package does not enable a remote shell on the unit.
-- Anything that needs a change of the kernel or the bootloader.
-- Other models. This is for the X45 only.
+- **Other models.** This is written for the X45 only. Other models are possible, but I can only write and test for
+  hardware I have in front of me. If you want your model supported, donate a unit so it can be implemented.
+
+Hardware limits (cannot be fixed in software):
+
+- The unit has no Wi-Fi or Bluetooth radio of its own. Both need a supported USB stick.
 
 ## Quick start
 

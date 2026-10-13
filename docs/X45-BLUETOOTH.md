@@ -8,9 +8,11 @@ What works: the unit shows up as a Bluetooth speaker ("CocktailAudio-X45"), a ph
 comparison, shown on the panel, confirmed with OK), and A2DP audio (SBC) plays through the normal DAC path.
 AVRCP works, so play and pause from the phone are seen. Only phones that were paired before can connect.
 
-What does not work: anything but that one kind of stick, audio sources other than SBC (no aptX or LDAC), Bluetooth
-as a source (the unit sending to a speaker), and Bluetooth LE. The stick needs a bring-up after every power on
-(see below), which `x45bt-run` does.
+The unit can also be the source: it sends its sound to a paired headset or speaker (A2DP, SBC), pairing from the
+panel, auto-connect, and the main outputs are muted while the headset is connected.
+
+Not done: anything but that one kind of stick, codecs other than SBC (no aptX or LDAC), and Bluetooth LE. The stick
+needs a bring-up after every power on (see below), which `x45bt-run` does.
 
 ## The stick
 
