@@ -20,6 +20,7 @@ your own risk.
 - [Screenshots](#screenshots)
 - [What does not work](#what-does-not-work)
 - [Quick start](#quick-start)
+- [Wi-Fi driver](#wi-fi-driver-optional)
 - [Using it](#using-it)
 - [Going back to the original software](#going-back-to-the-original-software)
 - [Build options](#build-options)
@@ -152,10 +153,10 @@ Built, but not proven:
 
 Not done yet:
 
-- **The Wi-Fi driver is not built by the scripts.** Wi-Fi works on the unit this was developed on, but the kernel
-  driver for the Wi-Fi stick has to be built against the unit's own kernel, which the automated build does not do.
-  A package built from these scripts has the Wi-Fi tools, screens and web tab but not the driver. Until that is done,
-  use the Ethernet port.
+- **The Wi-Fi driver is an extra step.** The kernel driver for the Wi-Fi stick has to match the unit's own kernel, so it
+  is not part of the normal build. See [Wi-Fi driver](#wi-fi-driver-optional) below: it needs SSH access to your unit
+  once. Without it a package has the Wi-Fi tools, screens and web tab but not the driver, and the Ethernet port is the
+  way to get online. The driver build has been tested on a PC; loading it on a unit from a clean build has not.
 - **SSH.** The unit has an SSH server, and it works, but the package does not switch it on for you.
 - **HDMI output.** The unit has the port, and the panel is drawn on the built-in display only. Nobody has written
   the HDMI output yet.
@@ -223,6 +224,21 @@ The updater then looks for `firmware.pkg` on the stick.
 The package only adds files. It does not replace the original software, the kernel or any system file. The installer
 checks its own files first, and it stops without changes if the unit does not look like an X45.
 
+### Wi-Fi driver (optional)
+
+The USB Wi-Fi stick needs a kernel module that fits the unit's kernel exactly. The unit's kernel source is not public,
+so two files are read from your own unit once, and the module is built against them. You need an SSH login as root on
+the unit (the package does not switch SSH on) and the stick is not needed for this.
+
+```bash
+scripts/kernelsyms.sh root@ADDRESS-OF-THE-UNIT   # reads the kernel configuration and the symbol checksums, changes nothing
+scripts/wifidriver.sh                            # downloads NXP's kernel headers (120 MB) and the driver, builds both modules
+./build.sh stage && ./make-pkg.sh                # the package now contains the driver and the chip's firmware files
+```
+
+The build checks every symbol checksum of the module against the unit's table and stops if one differs. The two files
+from your unit stay in `.build/kernel-data` on your computer. Details are in the header of `scripts/wifidriver.sh`.
+
 ## Using it
 
 **Panel.** The keys and the knob do what the hints at the foot of each screen say. The main ones:
@@ -284,6 +300,7 @@ computer and checks a fresh install, a second install, a damaged package, a wron
 ./setup.sh                             # only the programs, downloads and compilers
 ./build.sh                             # only the build
 ./build.sh deps panel mpd              # only some steps (deps panel mpd airplay upnp spotify wifi bluetooth stage)
+./build.sh wifidriver                  # the optional Wi-Fi driver (after scripts/kernelsyms.sh)
 ./build.sh clean                       # remove the build directory, keep the downloads
 X45_SKIP="spotify bluetooth" ./make-pkg.sh   # leave out optional parts (airplay spotify upnp wifi bluetooth)
 ```

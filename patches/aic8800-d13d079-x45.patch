@@ -1,0 +1,13 @@
+--- a/aic_priv_cmd.c
++++ b/aic_priv_cmd.c
+@@ -1403,8 +1403,8 @@
+ 	ret = regulatory_set_wiphy_regd(
+ 		rwnx_hw->wiphy, regdomain);
+ #else
+-	ret = wiphy_apply_custom_regulatory(
+-		rwnx_hw->wiphy, regdomain);
++	wiphy_apply_custom_regulatory(rwnx_hw->wiphy, regdomain); /* X45: void on 3.x */
++	ret = 0;
+ #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0) */
+ 
+ #ifdef CONFIG_RADAR_OR_IR_DETECT

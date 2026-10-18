@@ -1,0 +1,4 @@
+# Extra downloads for the optional Wi-Fi driver (scripts/wifidriver.sh). Format: SHA256  file name  URL
+# Not part of the normal download: python3 scripts/fetch.py --file sources-wifidriver.txt
+262edeec9f56c415925d41a6c62ea8dfbac45e5b4fef3bc816f81db8863170e0  linux-imx-rel_imx_3.14.52_1.1.0_ga.tar.gz  https://github.com/nxp-imx/linux-imx/archive/refs/tags/rel_imx_3.14.52_1.1.0_ga.tar.gz
+8885bda125037cbaefd58828ac907a4036316a012cc72b5b1ae87a48f852113d  aic8800-d13d079.tar.gz  https://github.com/radxa-pkg/aic8800/archive/d13d07963cd15d731e2895e8288a04cca6152ac9.tar.gz

@@ -5,6 +5,7 @@
     python3 scripts/fetch.py --skip rust     leave out files whose name contains "rust" (repeatable)
     X45_SKIP="spotify bluetooth" python3 scripts/fetch.py   leave out everything only those optional parts need
     python3 scripts/fetch.py --dir DIR       use DIR as the cache (default: $X45_DL, else .build/dl)
+    python3 scripts/fetch.py --file NAME     download the files of scripts/NAME instead (the Wi-Fi driver has its own list)
 
 Every file is checked against the SHA256 in scripts/sources.txt. A file that is already in the cache with the right
 sum is not downloaded again, so the script can be run as often as you like. After the Spotify sources are there, the
@@ -157,10 +158,14 @@ def vendor_crates(cache):
 def main(argv):
     cache = default_dir()
     skip = []
+    listname = "sources.txt"
     i = 1
     while i < len(argv):
         if argv[i] == "--dir":
             cache = argv[i + 1]
+            i += 2
+        elif argv[i] == "--file":
+            listname = argv[i + 1]
             i += 2
         elif argv[i] == "--skip":
             skip.append(argv[i + 1])
@@ -171,7 +176,7 @@ def main(argv):
     for part in os.environ.get("X45_SKIP", "").split():
         skip.extend(GROUPS.get(part, []))
     os.makedirs(cache, exist_ok=True)
-    items = [it for it in read_sources(os.path.join(HERE, "sources.txt")) if not any(s in it["name"] for s in skip)]
+    items = [it for it in read_sources(os.path.join(HERE, listname)) if not any(s in it["name"] for s in skip)]
     print("cache: %s (%d files)" % (cache, len(items)))
     bad = 0
     with ThreadPoolExecutor(4) as ex:
@@ -179,7 +184,7 @@ def main(argv):
             print("  %-12s %s %s" % (state, name, info))
             if state == "FAILED":
                 bad += 1
-    if not any("librespot" in s or "rust" in s for s in skip):
+    if listname == "sources.txt" and not any("librespot" in s or "rust" in s for s in skip):
         bad += vendor_crates(cache)
     if bad:
         print("%d problem(s). Run the script again; if one file keeps failing, its address in sources.txt may have moved." % bad)

@@ -59,6 +59,19 @@ if ! skipped bluetooth; then
 	done
 fi
 
+# the Wi-Fi driver is built by scripts/wifidriver.sh (it needs two files from your unit); without it the package has the
+# Wi-Fi tools, screens and web tab but the stick stays unused
+if ! skipped wifi; then
+	if [ -f "$OUT/wifi/mod/aic8800_fdrv.ko" ] && [ -f "$OUT/wifi/mod/x45_aicbsp.ko" ]; then
+		mkdir -p "$T/wifi/mod" "$T/wifi/fw"
+		install -m644 "$OUT"/wifi/mod/*.ko "$T/wifi/mod/"
+		install -m644 "$OUT"/wifi/fw/* "$T/wifi/fw/"
+		echo "  Wi-Fi driver included"
+	else
+		echo "  Wi-Fi driver not built (see scripts/wifidriver.sh): Wi-Fi will not work with this package"
+	fi
+fi
+
 log "configuration"
 for f in mpd.conf shairport-sync.conf upmpdcli.conf stations.txt; do
 	install -m644 "$X45_ROOT/conf/$f" "$T/etc/$f"

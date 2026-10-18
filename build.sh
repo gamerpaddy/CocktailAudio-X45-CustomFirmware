@@ -2,7 +2,7 @@
 # Build all programs and assemble the file tree for the package.
 #
 #   ./build.sh                 build everything (runs ./setup.sh first when it has not been run)
-#   ./build.sh deps panel      build only the named steps; steps: deps panel mpd airplay upnp spotify wifi bluetooth stage
+#   ./build.sh deps panel      build only the named steps; steps: deps panel mpd airplay upnp spotify wifi bluetooth stage; wifidriver only by name
 #   ./build.sh clean           remove the build directory (the downloads are kept)
 #
 # Optional parts can be left out:  X45_SKIP="spotify bluetooth" ./build.sh
@@ -48,6 +48,7 @@ for s in "${steps[@]}"; do
 	upnp) log "UPnP renderer"; "$S/upnp.sh" ;;
 	spotify) log "Spotify Connect receiver"; "$S/librespot.sh" ;;
 	wifi) log "Wi-Fi tools"; "$S/wifitools.sh" ;;
+	wifidriver) log "Wi-Fi driver (needs scripts/kernelsyms.sh first)"; "$S/wifidriver.sh" ;;
 	bluetooth) log "Bluetooth"; "$S/bt.sh" ;;
 	stage) log "assembling the program tree"; "$S/stage.sh" ;;
 	*) die "unknown step: $s" ;;

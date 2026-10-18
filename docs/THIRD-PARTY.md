@@ -61,6 +61,8 @@ Optional parts (leave them out with `X45_SKIP`):
 | Bluetooth | BTstack | commit e385539 | BlueKitchen licence, see below |
 | Bluetooth | libusb | 1.0.27 | LGPL 2.1 or later |
 | Bluetooth | AIC8800D80 firmware files | radxa-pkg/aic8800 | the vendor's redistribution terms |
+| Wi-Fi driver (optional) | AIC8800 driver source | radxa-pkg/aic8800, commit d13d079 | GPL 2 |
+| Wi-Fi driver (optional) | linux-imx kernel headers and build rules | NXP, 3.14.52_1.1.0_ga | GPL 2 |
 
 ## Things to know
 
@@ -113,6 +115,11 @@ folder by `patches/btstack-e385539-x45btsrc.patch`, with a line of logging added
 `src/tools/aicload.c` follows the firmware download sequence of the Linux driver for the AIC8800 chips, which is
 public. It contains no code of the driver beyond the protocol constants. The firmware blobs themselves are never in
 this repository; `fetch.py` downloads them from a public repository and `stage.sh` puts them next to the loader.
+
+**Wi-Fi driver.** `scripts/wifidriver.sh` builds the stick's kernel driver from the public AIC8800 driver source with one
+small patch (`patches/aic8800-d13d079-x45.patch`) and two files of this project (`src/wifidrv/`). The kernel headers come
+from NXP's public linux-imx tree. The kernel configuration and the symbol checksums that the module has to match are read
+from your own unit by `scripts/kernelsyms.sh` and are not part of this repository.
 
 **Streaming services.** The package contains the open receivers for AirPlay, UPnP and Spotify Connect. No key,
 token or SDK of any streaming service is included or needed, and none is used to get around a service's rules.
