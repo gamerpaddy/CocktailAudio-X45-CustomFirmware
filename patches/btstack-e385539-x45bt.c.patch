@@ -650,7 +650,14 @@
      }
  
      // decide on audio sync drift based on number of sbc frames in queue
-@@ -600,8 +726,10 @@
+@@ -594,14 +720,16 @@
+ 
+     // nominal factor (fixed-point 2^16) and compensation offset
+     uint32_t nominal_factor = 0x10000;
+-    uint32_t compensation   = 0x00100;
++    uint32_t compensation   = 0x00010;   /* x45: was 0x100 (0.4%), audible as crackle; real drift is ~100 ppm */
+ 
+     if (sbc_frames_in_buffer < OPTIMAL_FRAMES_MIN){
      	resampling_factor = nominal_factor - compensation;    // stretch samples
      } else if (sbc_frames_in_buffer <= OPTIMAL_FRAMES_MAX){
      	resampling_factor = nominal_factor;                   // nothing to do

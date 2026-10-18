@@ -49,6 +49,7 @@ if ! skipped wifi; then
 fi
 if ! skipped bluetooth; then
 	put "$OUT/x45bt" x45bt
+	put "$OUT/x45btsrc" x45btsrc
 	put "$OUT/aicload" aicload
 	put "$OUT/sgsend" sgsend
 	mkdir -p "$T/bt/aicfw"

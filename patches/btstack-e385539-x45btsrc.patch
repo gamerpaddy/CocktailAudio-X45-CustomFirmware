@@ -1,0 +1,1501 @@
+--- a/example/x45btsrc.c
++++ b/example/x45btsrc.c
+@@ -0,0 +1,1471 @@
++/*
++ * Copyright (C) 2023 BlueKitchen GmbH
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. Neither the name of the copyright holders nor the names of
++ *    contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ * 4. Any redistribution, use, or modification is done solely for
++ *    personal benefit and not for any commercial purpose or for
++ *    monetary gain.
++ *
++ * THIS SOFTWARE IS PROVIDED BY BLUEKITCHEN GMBH AND CONTRIBUTORS
++ * ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL BLUEKITCHEN
++ * GMBH OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++ * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
++ * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * Please inquire about commercial licensing options at
++ * contact@bluekitchen-gmbh.com
++ *
++ */
++
++#define BTSTACK_FILE__ "x45btsrc.c"
++
++/*
++ * x45btsrc.c - the Bluetooth output of the X45: A2DP source + AVRCP target, headless.
++ * Derived from a2dp_source_demo.c and gap_inquiry.c. The panel software starts it (through x45btout-run),
++ * talks to it with lines on stdin and reads its answer from a status file:
++ *
++ *   commands (one per line)          scan | stopscan | connect ADDR | disconnect | forget ADDR | auto ADDR|none
++ *   status file (key=value lines)    /tmp/x45btout.status, rewritten atomically on every change
++ *   audio                            raw PCM, 44100 Hz, 16 bit, stereo, little endian, read from a FIFO that
++ *                                    MPD's "bluetooth" output writes (X45BTOUT_PCM, default /tmp/x45btout.pcm)
++ *
++ * What it does:
++ *  - scan: an inquiry, then the names of the audio devices that did not send one are asked for;
++ *    the list of what was heard (and of the devices paired earlier) goes into the status file
++ *  - connect: opens the audio link to a device (pairing it first when it is not paired: a headset has no
++ *    display, so the pairing is accepted for the device the owner chose and for no other); the device must
++ *    be in pairing mode for a first connection, a paired one only needs to be switched on
++ *  - auto: the device to call again by itself whenever the link is down (switched off and on again)
++ *  - audio: the PCM from the FIFO is SBC-encoded in real time. The stream starts when sound arrives and is
++ *    suspended again after a pause in it, so a paused player lets the headset go quiet
++ *  - the headset's play/pause/next/previous keys are passed on to MPD
++ */
++
++#include <ctype.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <inttypes.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
++#include <signal.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/time.h>
++#include <unistd.h>
++
++#include "btstack.h"
++#include "btstack_ring_buffer.h"
++#include "btstack_stdin.h"
++
++#define NUM_CHANNELS        2
++#define BYTES_PER_FRAME     (2 * NUM_CHANNELS)
++#define RATE                44100
++#define TICK_MS             10
++#define SBC_STORAGE_SIZE    1030
++
++#define PCM_RING_FRAMES     (RATE)                 /* one second of audio */
++#define START_FRAMES        (RATE * 130 / 1000)    /* the stream starts when this much has arrived */
++#define TARGET_FRAMES       (RATE * 120 / 1000)    /* and is kept about this far ahead of the encoder */
++#define HIGH_FRAMES         (RATE * 220 / 1000)    /* above this, a frame is dropped now and then */
++#define LOW_FRAMES          (RATE * 30 / 1000)     /* below this, one is repeated */
++#define IDLE_MS             2500                   /* no sound for this long: the stream is suspended */
++#define SLIP_ENCODES        40                     /* at most one dropped/repeated frame per this many SBC frames */
++#define CONNECT_TIMEOUT_MS  40000
++#define AUTO_MS             10000
++#define INQUIRY_UNITS       8                      /* x 1.28 s */
++#define MAX_DEV             32
++#define STATUS_PATH_DEFAULT "/tmp/x45btout.status"
++#define PCM_PATH_DEFAULT    "/tmp/x45btout.pcm"
++#define KNOWN_PATH_DEFAULT  "/home/root/x45new/bt/btout.known"
++
++/* ----------------------------------------------------------------------- devices --- */
++
++struct dev {
++    bd_addr_t addr;
++    char      name[64];
++    uint32_t  cod;
++    int       rssi;
++    int       rssi_ok;
++    int       known;           /* paired earlier (listed in the known file) */
++    int       heard;           /* answered the last scan */
++    uint8_t   psrm;
++    uint16_t  clock_offset;
++    int       name_asked;
++};
++static struct dev devs[MAX_DEV];
++static int ndev;
++
++static struct dev * dev_find(const bd_addr_t addr){
++    for (int i = 0; i < ndev; i++) if (memcmp(devs[i].addr, addr, 6) == 0) return &devs[i];
++    return NULL;
++}
++
++static struct dev * dev_add(const bd_addr_t addr){
++    struct dev * d = dev_find(addr);
++    if (d) return d;
++    if (ndev >= MAX_DEV) {   // full: make room by dropping a device that is neither paired nor heard last
++        for (int i = 0; i < ndev; i++) if (!devs[i].known && !devs[i].heard) { devs[i] = devs[--ndev]; break; }
++        if (ndev >= MAX_DEV) return NULL;
++    }
++    d = &devs[ndev++];
++    memset(d, 0, sizeof *d);
++    memcpy(d->addr, addr, 6);
++    return d;
++}
++
++static int dev_is_audio(const struct dev * d){
++    uint32_t major = (d->cod >> 8) & 0x1f;
++    return d->known || d->cod == 0 || major == 4;   // audio/video, or a class that was not announced
++}
++
++/* ------------------------------------------------------------------------- state --- */
++
++static btstack_packet_callback_registration_t hci_event_callback_registration;
++
++static uint8_t sdp_a2dp_source_service_buffer[150];
++static uint8_t sdp_avrcp_target_service_buffer[200];
++static uint8_t device_id_sdp_service_buffer[100];
++
++// 44.1 kHz only: the PCM that arrives is 44.1 kHz and nothing resamples it here
++static uint8_t media_sbc_codec_capabilities[] = {
++    (AVDTP_SBC_44100 << 4) | AVDTP_SBC_STEREO | AVDTP_SBC_JOINT_STEREO,
++    0xFF,
++    2, 53
++};
++static uint8_t media_sbc_codec_configuration[4];
++
++typedef struct {
++    int num_channels;
++    int sampling_frequency;
++    int block_length;
++    int subbands;
++    int min_bitpool_value;
++    int max_bitpool_value;
++    btstack_sbc_channel_mode_t      channel_mode;
++    btstack_sbc_allocation_method_t allocation_method;
++} sbc_conf_t;
++static sbc_conf_t sbc_conf;
++static const btstack_sbc_encoder_t * sbc_encoder_instance;
++static btstack_sbc_encoder_bluedroid_t sbc_encoder_state;
++static int encoder_ready;
++
++enum { SS_NONE, SS_OPEN, SS_STARTING, SS_STARTED, SS_PAUSING };
++
++static struct {
++    int      working;
++    int      scanning;           /* an inquiry or the name requests after it are running */
++    int      inquiry_active;
++    int      connecting;
++    uint32_t connect_t0;
++    bd_addr_t target;  int have_target;    /* the device we connect to / are connected to */
++    bd_addr_t autoaddr; int have_auto;
++    int muted;   // the panel's mute: the stream goes on, with silence
++    int vol;        // the unit's level for the headset, 0..100 (-1: not told yet)
++    int abs_state;  // 0 no AVRCP yet, 1 waiting for the headset's volume, 2 synced, 3 the headset has no absolute volume
++    int abs_sent;   // our level was sent to the headset in state 1
++    int vol_hold;   // silence until the headset's own level is set (never a blast at a reconnect)
++    int hs_vol;     // the level the headset last reported on its own buttons, 0..100
++    unsigned hs_seq;
++    int set_busy;   // we set the headset's level a moment ago: its echoes are not button presses
++    uint32_t set_ms;
++    int battery; // the headset's charge, 0..100, -1 unknown (HFP: Apple accessory report or the battery HF indicator)
++    int hfp_up;  // the hands-free service level connection to the target is up (no call audio: only the status travels)
++    int      acl_up;
++    hci_con_handle_t acl_handle;
++    bd_addr_t acl_addr;
++    uint16_t a2dp_cid;
++    uint8_t  local_seid;
++    int      a2dp_up;            /* the audio link to the target is open */
++    int      ss;                 /* stream state */
++    uint16_t avrcp_cid;
++    char     err[96];
++    unsigned seq;
++    unsigned underruns, slips, packets;
++    uint32_t last_rx_ms;         /* when PCM last arrived */
++    int      have_rx;
++} x;
++
++static btstack_timer_source_t flush_timer, audio_timer, connect_timer, auto_timer, avrcp_timer, shutdown_timer, hfp_timer, vol_timer;
++static int flush_armed;
++
++// PCM from the FIFO
++static uint8_t pcm_storage[PCM_RING_FRAMES * BYTES_PER_FRAME];
++static btstack_ring_buffer_t pcm_ring;
++static int pcm_fd = -1;
++static btstack_data_source_t pcm_source;
++static btstack_timer_source_t pcm_open_timer;
++
++// the encoder side
++static uint8_t  sbc_storage[SBC_STORAGE_SIZE];
++static uint16_t sbc_storage_count;
++static uint8_t  sbc_ready_to_send;
++static int      max_media_payload_size;
++static uint32_t rtp_timestamp;
++static uint32_t time_sent;           // ms of the last tick
++static uint32_t missed_samples;
++static uint32_t samples_ready;
++static unsigned since_slip;
++
++static void x_touch(void);
++static void do_connect(const bd_addr_t addr);
++static void stream_idle_check(uint32_t now);
++
++/* ------------------------------------------------------------------------ files --- */
++
++static const char * path_status(void){ return getenv("X45BTOUT_STATUS") ? getenv("X45BTOUT_STATUS") : STATUS_PATH_DEFAULT; }
++static const char * path_pcm(void){ return getenv("X45BTOUT_PCM") ? getenv("X45BTOUT_PCM") : PCM_PATH_DEFAULT; }
++static const char * path_known(void){ return getenv("X45BTOUT_KNOWN") ? getenv("X45BTOUT_KNOWN") : KNOWN_PATH_DEFAULT; }
++
++static void clean(char * s){
++    for (; *s; s++) if ((unsigned char) *s < 32 || *s == '|') *s = ' ';
++}
++
++static void known_save(void){
++    char tmp[200];
++    FILE * f;
++    snprintf(tmp, sizeof tmp, "%s.tmp", path_known());
++    f = fopen(tmp, "w");
++    if (!f) return;
++    for (int i = 0; i < ndev; i++){
++        char name[64];
++        if (!devs[i].known) continue;
++        snprintf(name, sizeof name, "%s", devs[i].name);
++        clean(name);
++        fprintf(f, "%s|%s|%06" PRIx32 "\n", bd_addr_to_str(devs[i].addr), name, devs[i].cod);
++    }
++    if (fclose(f) == 0) rename(tmp, path_known());
++}
++
++static void known_load(void){
++    FILE * f = fopen(path_known(), "r");
++    char line[200];
++    if (!f) return;
++    while (fgets(line, sizeof line, f)){
++        char * a = line, * n, * c;
++        bd_addr_t addr;
++        struct dev * d;
++        line[strcspn(line, "\r\n")] = 0;
++        n = strchr(a, '|');
++        if (!n) continue;
++        *n++ = 0;
++        c = strchr(n, '|');
++        if (c) *c++ = 0;
++        if (!sscanf_bd_addr(a, addr)) continue;
++        d = dev_add(addr);
++        if (!d) continue;
++        d->known = 1;
++        snprintf(d->name, sizeof d->name, "%s", n);
++        if (c) d->cod = (uint32_t) strtoul(c, NULL, 16);
++    }
++    fclose(f);
++}
++
++static const char * state_name(void){
++    if (!x.working) return "starting";
++    if (x.connecting) return "connecting";
++    if (x.a2dp_up) return x.ss == SS_STARTED ? "streaming" : "connected";
++    if (x.scanning) return "scanning";
++    return "ready";
++}
++
++static void status_write(void){
++    const char * path = path_status();
++    char tmp[200];
++    FILE * f;
++    snprintf(tmp, sizeof tmp, "%s.tmp", path);
++    f = fopen(tmp, "w");
++    if (!f) return;
++    fprintf(f, "seq=%u\nstate=%s\nscanning=%d\n", ++x.seq, state_name(), x.scanning);
++    fprintf(f, "target=%s\n", x.have_target ? bd_addr_to_str(x.target) : "");
++    {
++        struct dev * d = x.have_target ? dev_find(x.target) : NULL;
++        char name[64];
++        snprintf(name, sizeof name, "%s", d ? d->name : "");
++        clean(name);
++        fprintf(f, "name=%s\n", name);
++    }
++    fprintf(f, "connected=%d\nstreaming=%d\nrate=%d\n", x.a2dp_up, x.ss == SS_STARTED, RATE);
++    fprintf(f, "auto=%s\n", x.have_auto ? bd_addr_to_str(x.autoaddr) : "");
++    fprintf(f, "battery=%d\n", x.a2dp_up ? x.battery : -1);
++    fprintf(f, "volume=%d\nhsvol=%d\nhsseq=%u\nvolsync=%d\n", x.vol, x.hs_vol, x.hs_seq, x.abs_state);
++    fprintf(f, "error=%s\n", x.err);
++    fprintf(f, "underruns=%u\nslips=%u\nqueued_ms=%u\n", x.underruns, x.slips,
++            (unsigned) (btstack_ring_buffer_bytes_available(&pcm_ring) / BYTES_PER_FRAME * 1000 / RATE));
++    for (int i = 0; i < ndev; i++){
++        const struct dev * d = &devs[i];
++        char name[64];
++        if (!dev_is_audio(d)) continue;
++        if (!d->known && !d->heard) continue;
++        snprintf(name, sizeof name, "%s", d->name);
++        clean(name);
++        fprintf(f, "dev=%s|%s|%d|%d|%d|%d\n", bd_addr_to_str(d->addr), name, d->known,
++                x.a2dp_up && x.have_target && memcmp(x.target, d->addr, 6) == 0,
++                d->rssi_ok ? d->rssi : 0, d->heard);
++    }
++    if (fclose(f) == 0) rename(tmp, path);
++}
++
++static void flush_handler(btstack_timer_source_t * ts){
++    UNUSED(ts);
++    flush_armed = 0;
++    status_write();
++}
++
++static void x_touch(void){
++    if (flush_armed) return;
++    flush_armed = 1;
++    btstack_run_loop_set_timer_handler(&flush_timer, &flush_handler);
++    btstack_run_loop_set_timer(&flush_timer, 80);
++    btstack_run_loop_add_timer(&flush_timer);
++}
++
++static void set_error(const char * msg){
++    snprintf(x.err, sizeof x.err, "%s", msg);
++    printf("x45btsrc: %s\n", msg);
++    x_touch();
++}
++
++/* ------------------------------------------------------------------------- MPD --- */
++
++// One command to MPD on the loopback; the reply is read to its end so that the connection closes cleanly.
++static void mpd_send(const char * cmd){
++    struct sockaddr_in a;
++    struct timeval tv = { 0, 300000 };
++    char buf[512];
++    int s = socket(AF_INET, SOCK_STREAM, 0);
++    if (s < 0) return;
++    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
++    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
++    memset(&a, 0, sizeof a);
++    a.sin_family = AF_INET;
++    a.sin_port = htons(getenv("MPD_PORT") ? atoi(getenv("MPD_PORT")) : 6600);
++    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    if (connect(s, (struct sockaddr *) &a, sizeof a) == 0){
++        ssize_t n = read(s, buf, sizeof buf - 1);   // the greeting
++        if (n > 0){
++            char line[96];
++            snprintf(line, sizeof line, "%s\n", cmd);
++            if (write(s, line, strlen(line)) > 0) n = read(s, buf, sizeof buf - 1);
++        }
++    }
++    close(s);
++}
++
++static int mpd_state_is(const char * want){
++    struct sockaddr_in a;
++    struct timeval tv = { 0, 300000 };
++    char buf[1024];
++    int s = socket(AF_INET, SOCK_STREAM, 0), r = 0;
++    if (s < 0) return 0;
++    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
++    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
++    memset(&a, 0, sizeof a);
++    a.sin_family = AF_INET;
++    a.sin_port = htons(getenv("MPD_PORT") ? atoi(getenv("MPD_PORT")) : 6600);
++    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++    if (connect(s, (struct sockaddr *) &a, sizeof a) == 0){
++        ssize_t n = read(s, buf, sizeof buf - 1);
++        if (n > 0 && write(s, "status\n", 7) > 0){
++            n = read(s, buf, sizeof buf - 1);
++            if (n > 0){
++                char key[32];
++                buf[n] = 0;
++                snprintf(key, sizeof key, "state: %s", want);
++                r = strstr(buf, key) != NULL;
++            }
++        }
++    }
++    close(s);
++    return r;
++}
++
++/* ------------------------------------------------------------------------- PCM --- */
++
++static void pcm_close(void){
++    if (pcm_fd < 0) return;
++    btstack_run_loop_remove_data_source(&pcm_source);
++    close(pcm_fd);
++    pcm_fd = -1;
++}
++
++static void pcm_try_open(btstack_timer_source_t * ts);
++
++/* a headset without absolute volume: the unit scales the samples itself (quadratic, like a volume knob) */
++static void digital_gain(int16_t * pcm, size_t samples){
++    int v = x.vol < 0 ? 30 : x.vol;
++    int32_t g;
++    if (v >= 100) return;
++    g = (int32_t) v * v * 32767 / 10000;
++    for (size_t i = 0; i < samples; i++) pcm[i] = (int16_t) (((int32_t) pcm[i] * g) >> 15);
++}
++
++static void pcm_read_handler(btstack_data_source_t * ds, btstack_data_source_callback_type_t type){
++    uint8_t buf[4096] __attribute__((aligned(4)));
++    UNUSED(ds);
++    if (type != DATA_SOURCE_CALLBACK_READ) return;
++    for (int rounds = 0; rounds < 8; rounds++){
++        ssize_t n = read(pcm_fd, buf, sizeof buf);
++        if (n > 0){
++            x.last_rx_ms = btstack_run_loop_get_time_ms();
++            x.have_rx = 1;
++            n -= n % BYTES_PER_FRAME;   // MPD writes whole frames; keep it that way if a read is cut
++            // only worth keeping while there is somewhere to send it
++            if (x.a2dp_up && n > 0){
++                if (x.muted || x.vol_hold) memset(buf, 0, (size_t) n);
++                else if (x.abs_state == 3) digital_gain((int16_t *) buf, (size_t) n / 2);
++                if (btstack_ring_buffer_write(&pcm_ring, buf, (uint32_t) n) != ERROR_CODE_SUCCESS){
++                    // full: the encoder is not draining it (link stalled); the newest sound is dropped
++                }
++            }
++            if (n < (ssize_t) sizeof buf) break;
++        } else if (n == 0){
++            break;   // MPD closed its end; the FIFO stays open for our reading (O_RDWR is not used: see open)
++        } else {
++            if (errno == EAGAIN || errno == EINTR) break;
++            pcm_close();   // reopen later
++            btstack_run_loop_set_timer_handler(&pcm_open_timer, &pcm_try_open);
++            btstack_run_loop_set_timer(&pcm_open_timer, 2000);
++            btstack_run_loop_add_timer(&pcm_open_timer);
++            return;
++        }
++    }
++}
++
++static void pcm_try_open(btstack_timer_source_t * ts){
++    int fd;
++    UNUSED(ts);
++    if (pcm_fd >= 0) return;
++    fd = open(path_pcm(), O_RDONLY | O_NONBLOCK);
++    if (fd < 0){
++        btstack_run_loop_set_timer_handler(&pcm_open_timer, &pcm_try_open);
++        btstack_run_loop_set_timer(&pcm_open_timer, 2000);
++        btstack_run_loop_add_timer(&pcm_open_timer);
++        return;
++    }
++    pcm_fd = fd;
++    btstack_run_loop_set_data_source_fd(&pcm_source, fd);
++    btstack_run_loop_set_data_source_handler(&pcm_source, &pcm_read_handler);
++    btstack_run_loop_enable_data_source_callbacks(&pcm_source, DATA_SOURCE_CALLBACK_READ);
++    btstack_run_loop_add_data_source(&pcm_source);
++    printf("x45btsrc: reading PCM from %s\n", path_pcm());
++}
++
++static unsigned pcm_frames(void){
++    return btstack_ring_buffer_bytes_available(&pcm_ring) / BYTES_PER_FRAME;
++}
++
++static void pcm_reset(void){
++    btstack_ring_buffer_reset(&pcm_ring);
++}
++
++// n frames for the encoder from the ring, slipping a frame when the ring is too full or too empty
++static void pcm_take(int16_t * out, unsigned n){
++    int16_t tmp[(512 + 1) * NUM_CHANNELS];
++    unsigned have = pcm_frames(), want = n;
++    int slip = 0;
++    uint32_t got = 0;
++
++    if (n > 512) n = want = 512;
++    since_slip++;
++    if (since_slip >= SLIP_ENCODES){
++        if (have > HIGH_FRAMES && have >= n + 1)      { slip = 1;  want = n + 1; }
++        else if (have < LOW_FRAMES && have >= n)      { slip = -1; want = n - 1; }
++    }
++    if (want > have) want = have;
++    if (want) btstack_ring_buffer_read(&pcm_ring, (uint8_t *) tmp, want * BYTES_PER_FRAME, &got);
++    want = got / BYTES_PER_FRAME;
++    if (slip == 1 && want == n + 1){
++        unsigned h = n / 2;
++        memcpy(out, tmp, h * BYTES_PER_FRAME);
++        memcpy(out + h * NUM_CHANNELS, tmp + (h + 1) * NUM_CHANNELS, (n - h) * BYTES_PER_FRAME);
++        since_slip = 0;
++        x.slips++;
++        return;
++    }
++    if (slip == -1 && want == n - 1){
++        unsigned h = n / 2;
++        memcpy(out, tmp, h * BYTES_PER_FRAME);
++        memcpy(out + h * NUM_CHANNELS, tmp + (h - 1) * NUM_CHANNELS, BYTES_PER_FRAME);
++        memcpy(out + (h + 1) * NUM_CHANNELS, tmp + h * NUM_CHANNELS, (n - h - 1) * BYTES_PER_FRAME);
++        since_slip = 0;
++        x.slips++;
++        return;
++    }
++    if (want > n) want = n;
++    memcpy(out, tmp, want * BYTES_PER_FRAME);
++    if (want < n){   // ran dry: silence for the rest of the block
++        memset(out + want * NUM_CHANNELS, 0, (n - want) * BYTES_PER_FRAME);
++        x.underruns++;
++    }
++}
++
++/* ---------------------------------------------------------------------- encoder --- */
++
++static void send_media_packet(void){
++    int num_bytes_in_frame = sbc_encoder_instance->sbc_buffer_length(&sbc_encoder_state);
++    int bytes_in_storage = sbc_storage_count;
++    uint8_t num_sbc_frames = bytes_in_storage / num_bytes_in_frame;
++    sbc_storage[0] = num_sbc_frames;
++    a2dp_source_stream_send_media_payload_rtp(x.a2dp_cid, x.local_seid, 0, rtp_timestamp, sbc_storage, bytes_in_storage + 1);
++    rtp_timestamp += num_sbc_frames * sbc_encoder_instance->num_audio_frames(&sbc_encoder_state);
++    sbc_storage_count = 0;
++    sbc_ready_to_send = 0;
++    x.packets++;
++}
++
++static void fill_sbc(void){
++    unsigned n = sbc_encoder_instance->num_audio_frames(&sbc_encoder_state);
++    uint16_t sbc_len = sbc_encoder_instance->sbc_buffer_length(&sbc_encoder_state);
++    while (samples_ready >= n && (max_media_payload_size - sbc_storage_count) >= sbc_len){
++        int16_t pcm[256 * NUM_CHANNELS];
++        pcm_take(pcm, n);
++        sbc_encoder_instance->encode_signed_16(&sbc_encoder_state, pcm, &sbc_storage[1 + sbc_storage_count]);
++        sbc_storage_count += sbc_len;
++        samples_ready -= n;
++    }
++}
++
++static void audio_tick(btstack_timer_source_t * ts){
++    uint32_t now = btstack_run_loop_get_time_ms();
++    btstack_run_loop_set_timer(ts, TICK_MS);
++    btstack_run_loop_add_timer(ts);
++
++    if (!x.working || !x.a2dp_up || !encoder_ready) return;
++
++    if (x.ss == SS_OPEN){
++        // sound arrived and enough of it is queued: start the stream
++        if (x.have_rx && btstack_time_delta(now, x.last_rx_ms) < 500 && pcm_frames() >= START_FRAMES){
++            uint8_t st = a2dp_source_start_stream(x.a2dp_cid, x.local_seid);
++            if (st == ERROR_CODE_SUCCESS) x.ss = SS_STARTING;
++            else printf("x45btsrc: cannot start the stream, status 0x%02x\n", st);
++        }
++        return;
++    }
++    if (x.ss != SS_STARTED) return;
++
++    // the samples due since the last tick
++    {
++        uint32_t period = time_sent ? now - time_sent : TICK_MS;
++        uint32_t num = (period * RATE) / 1000;
++        missed_samples += (period * RATE) % 1000;
++        while (missed_samples >= 1000){ num++; missed_samples -= 1000; }
++        time_sent = now;
++        samples_ready += num;
++        // after a stall do not catch up in one burst
++        if (samples_ready > (uint32_t) (RATE / 10)) samples_ready = RATE / 10;
++    }
++    stream_idle_check(now);
++    if (x.ss != SS_STARTED) return;
++    if (sbc_ready_to_send) return;
++    fill_sbc();
++    if ((sbc_storage_count + sbc_encoder_instance->sbc_buffer_length(&sbc_encoder_state)) > max_media_payload_size){
++        sbc_ready_to_send = 1;
++        a2dp_source_stream_endpoint_request_can_send_now(x.a2dp_cid, x.local_seid);
++    }
++}
++
++// no sound for a while (paused, stopped, or MPD plays on the speakers again): suspend the stream
++static void stream_idle_check(uint32_t now){
++    if (x.ss != SS_STARTED) return;
++    if (x.have_rx && btstack_time_delta(now, x.last_rx_ms) <= IDLE_MS) return;
++    if (a2dp_source_pause_stream(x.a2dp_cid, x.local_seid) == ERROR_CODE_SUCCESS){
++        x.ss = SS_PAUSING;
++        printf("x45btsrc: no sound, stream suspended\n");
++        x_touch();
++    }
++}
++
++static void timer_start(void){
++    max_media_payload_size = btstack_min(a2dp_max_media_payload_size(x.a2dp_cid, x.local_seid), SBC_STORAGE_SIZE - 1);
++    sbc_storage_count = 0;
++    sbc_ready_to_send = 0;
++    time_sent = 0;
++    missed_samples = 0;
++    samples_ready = 0;
++    since_slip = 0;
++    // start with the queue at its working level: what arrived while the stream was opening is not played late
++    {
++        unsigned have = pcm_frames();
++        if (have > TARGET_FRAMES){
++            uint8_t junk[2048];
++            uint32_t drop = (have - TARGET_FRAMES) * BYTES_PER_FRAME, got;
++            while (drop){
++                uint32_t part = drop > sizeof junk ? sizeof junk : drop;
++                btstack_ring_buffer_read(&pcm_ring, junk, part, &got);
++                if (!got) break;
++                drop -= got;
++            }
++        }
++    }
++}
++
++/* -------------------------------------------------------------------- connecting --- */
++
++static void connect_timeout(btstack_timer_source_t * ts){
++    UNUSED(ts);
++    if (!x.connecting) return;
++    x.connecting = 0;
++    set_error("no answer from the device (is it on and in range?)");
++    if (x.a2dp_cid) a2dp_source_disconnect(x.a2dp_cid);
++    if (x.acl_up) gap_disconnect(x.acl_handle);
++    x_touch();
++}
++
++static void do_connect(const bd_addr_t addr){
++    uint8_t st;
++    if (!x.working) return;
++    if (x.scanning && x.inquiry_active) gap_inquiry_stop();
++    x.scanning = 0;
++    if (x.a2dp_up || x.acl_up){
++        if (x.have_target && memcmp(x.target, addr, 6) == 0 && x.a2dp_up) return;   // already
++        if (x.a2dp_cid) a2dp_source_disconnect(x.a2dp_cid);
++        if (x.acl_up) gap_disconnect(x.acl_handle);
++    }
++    memcpy(x.target, addr, 6);
++    x.have_target = 1;
++    x.connecting = 1;
++    x.err[0] = 0;
++    st = a2dp_source_establish_stream(x.target, &x.a2dp_cid);
++    if (st != ERROR_CODE_SUCCESS){
++        x.connecting = 0;
++        char m[64];
++        snprintf(m, sizeof m, "cannot connect (status 0x%02x)", st);
++        set_error(m);
++        return;
++    }
++    printf("x45btsrc: connecting to %s\n", bd_addr_to_str(addr));
++    btstack_run_loop_remove_timer(&connect_timer);
++    btstack_run_loop_set_timer_handler(&connect_timer, &connect_timeout);
++    btstack_run_loop_set_timer(&connect_timer, CONNECT_TIMEOUT_MS);
++    btstack_run_loop_add_timer(&connect_timer);
++    x_touch();
++}
++
++// the device to call again when the link is down
++static void auto_handler(btstack_timer_source_t * ts){
++    btstack_run_loop_set_timer_handler(ts, &auto_handler);
++    btstack_run_loop_set_timer(ts, AUTO_MS);
++    btstack_run_loop_add_timer(ts);
++    if (!x.working || !x.have_auto || x.connecting || x.a2dp_up || x.acl_up || x.scanning) return;
++    {   // only a device that has been paired: a first connection is the owner's choice, made with the device in pairing mode
++        struct dev * d = dev_find(x.autoaddr);
++        if (!d || !d->known) return;
++    }
++    printf("x45btsrc: calling %s\n", bd_addr_to_str(x.autoaddr));
++    do_connect(x.autoaddr);
++}
++
++static void connected_name_request(void){
++    struct dev * d = x.have_target ? dev_find(x.target) : NULL;
++    if (d && !d->name[0] && x.acl_up) gap_remote_name_request(x.target, 0, 0);
++}
++
++static void abs_set(void){   // the unit's level to the headset's own volume
++    if (!x.avrcp_cid || x.vol < 0) return;
++    x.set_busy = 1;
++    x.set_ms = btstack_run_loop_get_time_ms();
++    avrcp_controller_set_absolute_volume(x.avrcp_cid, (uint8_t) ((x.vol * 127 + 50) / 100));
++}
++
++static void vol_giveup(btstack_timer_source_t * ts){
++    UNUSED(ts);
++    if (!x.a2dp_up || x.abs_state == 2) return;
++    x.abs_state = 3;
++    x.vol_hold = 0;
++    printf("x45btsrc: the headset has no absolute volume, the level is set here\n");
++    x_touch();
++}
++
++static void avrcp_connect_late(btstack_timer_source_t * ts){
++    UNUSED(ts);
++    if (!x.a2dp_up || x.avrcp_cid != 0) return;
++    avrcp_connect(x.target, &x.avrcp_cid);
++}
++
++/* ------------------------------------------------------------------ hands-free (battery) --- */
++/* The headset reports its charge over the hands-free profile, not over A2DP. We play the phone's part of it, only
++ * far enough for that: the service level connection, no call, no call audio (no SCO is ever opened). */
++
++static uint8_t hfp_codecs[] = { HFP_CODEC_CVSD };
++static hfp_ag_indicator_t hfp_ag_indicators[] = {
++    // index, name, min range, max range, status, mandatory, enabled, status changed
++    {1, "service",   0, 1, 1, 0, 0, 0},
++    {2, "call",      0, 1, 0, 1, 1, 0},
++    {3, "callsetup", 0, 3, 0, 1, 1, 0},
++    {4, "battchg",   0, 5, 3, 0, 0, 0},
++    {5, "signal",    0, 5, 5, 0, 1, 0},
++    {6, "roam",      0, 1, 0, 0, 1, 0},
++    {7, "callheld",  0, 2, 0, 1, 1, 0}
++};
++static const char * hfp_hold_services[] = {"1", "1x", "2", "2x", "3"};
++static hfp_generic_status_indicator_t hfp_hf_indicators[] = { {1, 1}, {2, 1} };
++static uint8_t hfp_sdp_buffer[200];
++#define HFP_FEATURES ((1 << HFP_AGSF_HF_INDICATORS) | (1 << HFP_AGSF_EXTENDED_ERROR_RESULT_CODES))
++
++static void hfp_connect_late(btstack_timer_source_t * ts){
++    UNUSED(ts);
++    if (!x.a2dp_up || x.hfp_up) return;
++    printf("x45btsrc: hands-free connect\n");
++    hfp_ag_establish_service_level_connection(x.target);
++}
++
++/* Bose headsets (company id 0x009E in the hands-free vendor report) do not tell their charge over the hands-free
++ * profile unless it changes; they answer a plain question on their own serial channel (BMAP, RFCOMM channel 8):
++ * "02 02 01 00" (block 2, function 2 = battery level, get) is answered by "02 02 03 01 NN", NN in percent. */
++#define BMAP_CHANNEL   8
++#define BMAP_VENDOR    0x009E
++#define BMAP_ASK_MS    60000u
++static uint16_t bmap_cid;
++static unsigned bmap_step;
++static btstack_timer_source_t bmap_timer;
++
++static void bmap_timer_cb(btstack_timer_source_t * ts){
++    if (bmap_cid) rfcomm_request_can_send_now_event(bmap_cid);
++    btstack_run_loop_set_timer(ts, BMAP_ASK_MS);
++    btstack_run_loop_add_timer(ts);
++}
++
++static void bmap_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t size){
++    UNUSED(channel);
++    if (packet_type == RFCOMM_DATA_PACKET){
++        char hex[3 * 16 + 1];
++        uint16_t i;
++        for (i = 0; i < size && i < 16; i++) snprintf(hex + 3 * i, 4, "%02x ", packet[i]);
++        hex[3 * i] = 0;
++        printf("x45btsrc: bose rx %u bytes: %s\n", size, hex);
++        if (size >= 5 && packet[0] == 2 && packet[1] == 2 && (packet[2] & 3) == 3 && packet[3] >= 1 && packet[4] <= 100){
++            x.battery = packet[4];
++            printf("x45btsrc: battery %d%% (bose)\n", x.battery);
++            x_touch();
++        }
++        return;
++    }
++    if (packet_type != HCI_EVENT_PACKET) return;
++    switch (hci_event_packet_get_type(packet)){
++        case RFCOMM_EVENT_CHANNEL_OPENED:
++            if (rfcomm_event_channel_opened_get_status(packet) != ERROR_CODE_SUCCESS){
++                bmap_cid = 0;
++                printf("x45btsrc: bose channel failed (status 0x%02x)\n", rfcomm_event_channel_opened_get_status(packet));
++                break;
++            }
++            bmap_cid = rfcomm_event_channel_opened_get_rfcomm_cid(packet);
++            printf("x45btsrc: bose channel open\n");
++            bmap_step = 0;
++            rfcomm_request_can_send_now_event(bmap_cid);
++            btstack_run_loop_remove_timer(&bmap_timer);
++            btstack_run_loop_set_timer_handler(&bmap_timer, &bmap_timer_cb);
++            btstack_run_loop_set_timer(&bmap_timer, BMAP_ASK_MS);
++            btstack_run_loop_add_timer(&bmap_timer);
++            break;
++        case RFCOMM_EVENT_CAN_SEND_NOW: {
++            static const uint8_t ask[][4] = { { 0, 1, 1, 0 }, { 2, 2, 1, 0 }, { 1, 1, 1, 0 } };   // firmware, battery, device
++            if (bmap_cid){
++                unsigned q = bmap_step < 3 ? bmap_step : 1;   // the first round asks all three, later ones the battery alone
++                printf("x45btsrc: bose ask %u, send status %u\n", q, rfcomm_send(bmap_cid, (uint8_t *) ask[q], 4));
++                if (bmap_step < 3 && ++bmap_step < 3) rfcomm_request_can_send_now_event(bmap_cid);
++                else bmap_step = 3;
++            }
++            break;
++        }
++        case RFCOMM_EVENT_CHANNEL_CLOSED:
++            bmap_cid = 0;
++            btstack_run_loop_remove_timer(&bmap_timer);
++            break;
++        default:
++            break;
++    }
++}
++
++static void hfp_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t size){
++    UNUSED(channel); UNUSED(size);
++    if (packet_type != HCI_EVENT_PACKET || hci_event_packet_get_type(packet) != HCI_EVENT_HFP_META) return;
++    switch (hci_event_hfp_meta_get_subevent_code(packet)){
++        case HFP_SUBEVENT_SERVICE_LEVEL_CONNECTION_ESTABLISHED:
++            if (hfp_subevent_service_level_connection_established_get_status(packet) == ERROR_CODE_SUCCESS){
++                x.hfp_up = 1;
++                printf("x45btsrc: hands-free up\n");
++            } else {
++                printf("x45btsrc: hands-free failed (status 0x%02x)\n", hfp_subevent_service_level_connection_established_get_status(packet));
++            }
++            break;
++        case HFP_SUBEVENT_SERVICE_LEVEL_CONNECTION_RELEASED:
++            x.hfp_up = 0;
++            break;
++        case HFP_SUBEVENT_APPLE_BATTERY_LEVEL: {   // 0..9
++            int lvl = packet[3];
++            if (lvl > 9) lvl = 9;
++            x.battery = (lvl * 100 + 4) / 9;
++            printf("x45btsrc: battery %d%% (apple level %d)\n", x.battery, lvl);
++            x_touch();
++            break;
++        }
++        case HFP_SUBEVENT_APPLE_ACCESSORY_INFORMATION:
++            if (hfp_subevent_apple_accessory_information_get_vendor_id(packet) == BMAP_VENDOR && !bmap_cid && x.a2dp_up){
++                uint16_t cid;
++                printf("x45btsrc: bose headset, asking for its charge\n");
++                if (rfcomm_create_channel(&bmap_packet_handler, x.target, BMAP_CHANNEL, &cid) != ERROR_CODE_SUCCESS)
++                    printf("x45btsrc: bose channel could not be started\n");
++            }
++            break;
++        case HFP_SUBEVENT_HF_INDICATOR:
++            if (hfp_subevent_hf_indicator_get_uuid(packet) == HFP_HF_INDICATOR_UUID_BATTERY_LEVEL){
++                x.battery = hfp_subevent_hf_indicator_get_value(packet);
++                printf("x45btsrc: battery %d%% (indicator)\n", x.battery);
++                x_touch();
++            }
++            break;
++        default:
++            printf("x45btsrc: hands-free event 0x%02x\n", hci_event_hfp_meta_get_subevent_code(packet));
++            break;
++    }
++}
++
++/* ---------------------------------------------------------------------- scanning --- */
++
++static void names_next(void){
++    for (int i = 0; i < ndev; i++){
++        struct dev * d = &devs[i];
++        if (!d->heard || d->name[0] || d->name_asked || !dev_is_audio(d)) continue;
++        d->name_asked = 1;
++        if (gap_remote_name_request(d->addr, d->psrm, d->clock_offset | 0x8000) == 0) return;
++    }
++    // nothing left to ask
++    if (x.scanning && !x.inquiry_active){
++        x.scanning = 0;
++        x_touch();
++    }
++}
++
++static void scan_start(void){
++    if (!x.working) return;
++    if (x.a2dp_up || x.connecting){
++        set_error("disconnect first, then scan");
++        return;
++    }
++    if (x.scanning) return;
++    x.err[0] = 0;
++    for (int i = 0; i < ndev; ){   // what was heard last time and is not paired is forgotten
++        devs[i].heard = 0;
++        devs[i].name_asked = 0;
++        if (!devs[i].known){ devs[i] = devs[--ndev]; continue; }
++        i++;
++    }
++    x.scanning = 1;
++    x.inquiry_active = 1;
++    gap_inquiry_start(INQUIRY_UNITS);
++    printf("x45btsrc: scanning\n");
++    x_touch();
++}
++
++static void scan_stop(void){
++    if (x.inquiry_active) gap_inquiry_stop();
++    else if (x.scanning){ x.scanning = 0; x_touch(); }
++}
++
++/* ------------------------------------------------------------------------- events --- */
++
++static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t size){
++    bd_addr_t address;
++    UNUSED(channel);
++    UNUSED(size);
++    if (packet_type != HCI_EVENT_PACKET) return;
++    switch (hci_event_packet_get_type(packet)){
++        case BTSTACK_EVENT_STATE:
++            if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING){
++                x.working = 1;
++                printf("x45btsrc: up, %d known device(s)\n", ndev);
++                btstack_run_loop_set_timer_handler(&auto_timer, &auto_handler);
++                btstack_run_loop_set_timer(&auto_timer, 3000);
++                btstack_run_loop_add_timer(&auto_timer);
++                x_touch();
++            } else if (btstack_event_state_get_state(packet) == HCI_STATE_HALTING){
++                x.working = 0;
++            }
++            break;
++        case GAP_EVENT_INQUIRY_RESULT: {
++            struct dev * d;
++            gap_event_inquiry_result_get_bd_addr(packet, address);
++            d = dev_add(address);
++            if (!d) break;
++            d->heard = 1;
++            d->cod = gap_event_inquiry_result_get_class_of_device(packet);
++            d->psrm = gap_event_inquiry_result_get_page_scan_repetition_mode(packet);
++            d->clock_offset = gap_event_inquiry_result_get_clock_offset(packet);
++            if (gap_event_inquiry_result_get_rssi_available(packet)){
++                d->rssi = (int8_t) gap_event_inquiry_result_get_rssi(packet);
++                d->rssi_ok = 1;
++            }
++            if (gap_event_inquiry_result_get_name_available(packet)){
++                int len = gap_event_inquiry_result_get_name_len(packet);
++                if (len >= (int) sizeof d->name) len = (int) sizeof d->name - 1;
++                memcpy(d->name, gap_event_inquiry_result_get_name(packet), len);
++                d->name[len] = 0;
++            }
++            x_touch();
++            break;
++        }
++        case GAP_EVENT_INQUIRY_COMPLETE:
++            x.inquiry_active = 0;
++            if (x.scanning) names_next();
++            x_touch();
++            break;
++        case HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE: {
++            struct dev * d;
++            hci_event_remote_name_request_complete_get_bd_addr(packet, address);
++            d = dev_find(address);
++            if (d && hci_event_remote_name_request_complete_get_status(packet) == ERROR_CODE_SUCCESS){
++                snprintf(d->name, sizeof d->name, "%.*s", (int) sizeof d->name - 1, hci_event_remote_name_request_complete_get_remote_name(packet));
++                if (d->known) known_save();
++            }
++            if (x.scanning) names_next();
++            x_touch();
++            break;
++        }
++        case HCI_EVENT_CONNECTION_COMPLETE:
++            if (hci_event_connection_complete_get_status(packet) != ERROR_CODE_SUCCESS){
++                if (x.connecting){
++                    char m[80];
++                    uint8_t s = hci_event_connection_complete_get_status(packet);
++                    x.connecting = 0;
++                    snprintf(m, sizeof m, "connection failed (0x%02x%s)", s, s == 0x04 ? ", no answer" : "");
++                    set_error(m);
++                }
++                break;
++            }
++            hci_event_connection_complete_get_bd_addr(packet, address);
++            x.acl_up = 1;
++            x.acl_handle = hci_event_connection_complete_get_connection_handle(packet);
++            memcpy(x.acl_addr, address, 6);
++            if (!x.have_target || memcmp(x.target, address, 6) != 0){   // the paired headset called us
++                memcpy(x.target, address, 6);
++                x.have_target = 1;
++            }
++            dev_add(address);
++            printf("x45btsrc: link to %s, we are %s\n", bd_addr_to_str(address),
++                   gap_get_role(x.acl_handle) == HCI_ROLE_MASTER ? "master" : "slave");
++            x_touch();
++            break;
++        case HCI_EVENT_DISCONNECTION_COMPLETE:
++            if (x.acl_up && hci_event_disconnection_complete_get_connection_handle(packet) == x.acl_handle){
++                x.acl_up = 0;
++                if (x.connecting){
++                    x.connecting = 0;
++                    if (!x.err[0]) set_error("the device closed the connection");
++                }
++                x_touch();
++                printf("x45btsrc: link closed\n");
++            }
++            break;
++        case HCI_EVENT_PIN_CODE_REQUEST:   // an older device with a fixed pin: the usual one, for the device the owner chose
++            hci_event_pin_code_request_get_bd_addr(packet, address);
++            if (x.have_target && memcmp(address, x.target, 6) == 0){
++                printf("x45btsrc: pin 0000 for %s\n", bd_addr_to_str(address));
++                gap_pin_code_response(address, "0000");
++            } else {
++                gap_pin_code_negative(address);
++            }
++            break;
++        case HCI_EVENT_USER_CONFIRMATION_REQUEST:   // a headset has no display: accept for the chosen device only
++            hci_event_user_confirmation_request_get_bd_addr(packet, address);
++            if (x.have_target && memcmp(address, x.target, 6) == 0){
++                printf("x45btsrc: pairing with %s\n", bd_addr_to_str(address));
++                gap_ssp_confirmation_response(address);
++            } else {
++                printf("x45btsrc: pairing request from %s refused\n", bd_addr_to_str(address));
++                gap_ssp_confirmation_negative(address);
++            }
++            break;
++        case HCI_EVENT_SIMPLE_PAIRING_COMPLETE:
++            printf("x45btsrc: pairing finished, status 0x%02x\n", hci_event_simple_pairing_complete_get_status(packet));
++            if (hci_event_simple_pairing_complete_get_status(packet) != ERROR_CODE_SUCCESS && x.connecting)
++                set_error("pairing failed (is the device in pairing mode?)");
++            break;
++        case HCI_EVENT_LINK_KEY_NOTIFICATION: {
++            struct dev * d;
++            hci_event_link_key_request_get_bd_addr(packet, address);
++            d = dev_add(address);
++            if (d){ d->known = 1; known_save(); }
++            x_touch();
++            break;
++        }
++        default:
++            break;
++    }
++}
++
++static void avrcp_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t size){
++    UNUSED(channel);
++    UNUSED(size);
++    if (packet_type != HCI_EVENT_PACKET) return;
++    if (hci_event_packet_get_type(packet) != HCI_EVENT_AVRCP_META) return;
++    switch (packet[2]){
++        case AVRCP_SUBEVENT_CONNECTION_ESTABLISHED:
++            if (avrcp_subevent_connection_established_get_status(packet) != ERROR_CODE_SUCCESS){
++                x.avrcp_cid = 0;
++                return;
++            }
++            x.avrcp_cid = avrcp_subevent_connection_established_get_avrcp_cid(packet);
++            printf("x45btsrc: AVRCP up\n");
++            x.abs_state = 1;
++            x.abs_sent = 0;
++            avrcp_controller_enable_notification(x.avrcp_cid, AVRCP_NOTIFICATION_EVENT_VOLUME_CHANGED);
++            avrcp_target_support_event(x.avrcp_cid, AVRCP_NOTIFICATION_EVENT_PLAYBACK_STATUS_CHANGED);
++            avrcp_target_support_event(x.avrcp_cid, AVRCP_NOTIFICATION_EVENT_TRACK_CHANGED);
++            avrcp_target_set_now_playing_info(x.avrcp_cid, NULL, 1);
++            break;
++        case AVRCP_SUBEVENT_CONNECTION_RELEASED:
++            x.avrcp_cid = 0;
++            break;
++        case AVRCP_SUBEVENT_NOTIFICATION_VOLUME_CHANGED: {   // 0..127: the first one is the answer to our registration
++            int pct = (avrcp_subevent_notification_volume_changed_get_absolute_volume(packet) * 100 + 63) / 127;
++            if (x.abs_state == 1){
++                if (x.vol < 0){                       // the unit has no level yet: take the headset's
++                    x.vol = pct;
++                    x.abs_state = 2;
++                    x.vol_hold = 0;
++                } else if (!x.abs_sent){
++                    x.abs_sent = 1;
++                    abs_set();
++                } else if (pct >= x.vol - 1 && pct <= x.vol + 1){   // our level arrived
++                    x.abs_state = 2;
++                    x.vol_hold = 0;
++                }
++            } else if (x.abs_state == 2 && x.set_busy && (uint32_t) (btstack_run_loop_get_time_ms() - x.set_ms) < 1500){
++                // an echo of what we just set
++            } else if (x.abs_state == 2 && (pct > x.vol + 1 || pct < x.vol - 1)){   // a button on the headset
++                x.vol = pct;
++                x.hs_vol = pct;
++                x.hs_seq++;
++                printf("x45btsrc: headset volume %d%%\n", pct);
++            }
++            x_touch();
++            break;
++        }
++        case AVRCP_SUBEVENT_SET_ABSOLUTE_VOLUME_RESPONSE:
++            if (x.abs_state == 1){
++                x.abs_state = 2;
++                x.vol_hold = 0;
++                printf("x45btsrc: headset volume set to %d%%\n", x.vol);
++                x_touch();
++            }
++            break;
++        default:
++            break;
++    }
++}
++
++static void avrcp_target_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t size){
++    UNUSED(channel);
++    UNUSED(size);
++    if (packet_type != HCI_EVENT_PACKET) return;
++    if (hci_event_packet_get_type(packet) != HCI_EVENT_AVRCP_META) return;
++    switch (packet[2]){
++        case AVRCP_SUBEVENT_PLAY_STATUS_QUERY:
++            avrcp_target_play_status(x.avrcp_cid, 0xFFFFFFFF, 0xFFFFFFFF,
++                                     x.ss == SS_STARTED ? AVRCP_PLAYBACK_STATUS_PLAYING : AVRCP_PLAYBACK_STATUS_PAUSED);
++            break;
++        case AVRCP_SUBEVENT_OPERATION: {
++            avrcp_operation_id_t op = (avrcp_operation_id_t) avrcp_subevent_operation_get_operation_id(packet);
++            if (!avrcp_subevent_operation_get_button_pressed(packet)) break;
++            printf("x45btsrc: key %s\n", avrcp_operation2str(op));
++            switch (op){
++                // the headset has one button and sends PLAY whatever it believes: it is a toggle
++                case AVRCP_OPERATION_ID_PLAY:     mpd_send(mpd_state_is("play") ? "pause 1" : mpd_state_is("pause") ? "pause 0" : "play"); break;
++                case AVRCP_OPERATION_ID_PAUSE:    mpd_send("pause 1"); break;
++                case AVRCP_OPERATION_ID_STOP:     mpd_send("stop"); break;
++                case AVRCP_OPERATION_ID_FORWARD:  mpd_send("next"); break;
++                case AVRCP_OPERATION_ID_BACKWARD: mpd_send("previous"); break;
++                default: break;
++            }
++            break;
++        }
++        default:
++            break;
++    }
++}
++
++static void a2dp_source_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t size){
++    bd_addr_t address;
++    uint8_t status;
++    UNUSED(channel);
++    UNUSED(size);
++    if (packet_type != HCI_EVENT_PACKET) return;
++    if (hci_event_packet_get_type(packet) != HCI_EVENT_A2DP_META) return;
++
++    switch (hci_event_a2dp_meta_get_subevent_code(packet)){
++        case A2DP_SUBEVENT_SIGNALING_CONNECTION_ESTABLISHED:
++            status = a2dp_subevent_signaling_connection_established_get_status(packet);
++            if (status != ERROR_CODE_SUCCESS){
++                char m[80];
++                x.connecting = 0;
++                x.a2dp_cid = 0;
++                snprintf(m, sizeof m, "the device does not accept audio (status 0x%02x)", status);
++                set_error(m);
++                break;
++            }
++            x.a2dp_cid = a2dp_subevent_signaling_connection_established_get_a2dp_cid(packet);
++            a2dp_subevent_signaling_connection_established_get_bd_addr(packet, address);
++            printf("x45btsrc: signaling to %s up\n", bd_addr_to_str(address));
++            break;
++
++        case A2DP_SUBEVENT_SIGNALING_MEDIA_CODEC_SBC_CONFIGURATION: {
++            uint8_t allocation_method;
++            if (a2dp_subevent_signaling_media_codec_sbc_configuration_get_a2dp_cid(packet) != x.a2dp_cid) break;
++            sbc_conf.num_channels = a2dp_subevent_signaling_media_codec_sbc_configuration_get_num_channels(packet);
++            sbc_conf.sampling_frequency = a2dp_subevent_signaling_media_codec_sbc_configuration_get_sampling_frequency(packet);
++            sbc_conf.block_length = a2dp_subevent_signaling_media_codec_sbc_configuration_get_block_length(packet);
++            sbc_conf.subbands = a2dp_subevent_signaling_media_codec_sbc_configuration_get_subbands(packet);
++            sbc_conf.min_bitpool_value = a2dp_subevent_signaling_media_codec_sbc_configuration_get_min_bitpool_value(packet);
++            sbc_conf.max_bitpool_value = a2dp_subevent_signaling_media_codec_sbc_configuration_get_max_bitpool_value(packet);
++            allocation_method = a2dp_subevent_signaling_media_codec_sbc_configuration_get_allocation_method(packet);
++            sbc_conf.allocation_method = (btstack_sbc_allocation_method_t) (allocation_method - 1);
++            switch (a2dp_subevent_signaling_media_codec_sbc_configuration_get_channel_mode(packet)){
++                case AVDTP_CHANNEL_MODE_JOINT_STEREO: sbc_conf.channel_mode = SBC_CHANNEL_MODE_JOINT_STEREO; break;
++                case AVDTP_CHANNEL_MODE_STEREO:       sbc_conf.channel_mode = SBC_CHANNEL_MODE_STEREO; break;
++                case AVDTP_CHANNEL_MODE_DUAL_CHANNEL: sbc_conf.channel_mode = SBC_CHANNEL_MODE_DUAL_CHANNEL; break;
++                default:                              sbc_conf.channel_mode = SBC_CHANNEL_MODE_MONO; break;
++            }
++            printf("x45btsrc: SBC %d Hz, %d blocks, %d subbands, bitpool %d..%d, channel mode %d\n", sbc_conf.sampling_frequency,
++                   sbc_conf.block_length, sbc_conf.subbands, sbc_conf.min_bitpool_value, sbc_conf.max_bitpool_value, sbc_conf.channel_mode);
++            if (sbc_conf.sampling_frequency != RATE || sbc_conf.num_channels != 2){
++                set_error("the device wants a format this unit does not send");
++                break;
++            }
++            sbc_encoder_instance = btstack_sbc_encoder_bluedroid_init_instance(&sbc_encoder_state);
++            sbc_encoder_instance->configure(&sbc_encoder_state, SBC_MODE_STANDARD, sbc_conf.block_length, sbc_conf.subbands,
++                                            sbc_conf.allocation_method, sbc_conf.sampling_frequency, sbc_conf.max_bitpool_value,
++                                            sbc_conf.channel_mode);
++            encoder_ready = 1;
++            break;
++        }
++
++        case A2DP_SUBEVENT_STREAM_ESTABLISHED: {
++            struct dev * d;
++            status = a2dp_subevent_stream_established_get_status(packet);
++            if (status != ERROR_CODE_SUCCESS){
++                char m[80];
++                x.connecting = 0;
++                snprintf(m, sizeof m, "audio link failed (status 0x%02x)", status);
++                set_error(m);
++                break;
++            }
++            a2dp_subevent_stream_established_get_bd_addr(packet, address);
++            x.a2dp_cid = a2dp_subevent_stream_established_get_a2dp_cid(packet);
++            x.local_seid = a2dp_subevent_stream_established_get_local_seid(packet);
++            x.a2dp_up = 1;
++            x.abs_state = 0;
++            x.abs_sent = 0;
++            x.set_busy = 0;
++            x.vol_hold = 1;   // until the headset's own level is set
++            btstack_run_loop_remove_timer(&vol_timer);
++            btstack_run_loop_set_timer_handler(&vol_timer, &vol_giveup);
++            btstack_run_loop_set_timer(&vol_timer, 7000);
++            btstack_run_loop_add_timer(&vol_timer);
++            x.connecting = 0;
++            x.ss = SS_OPEN;
++            x.err[0] = 0;
++            btstack_run_loop_remove_timer(&connect_timer);
++            memcpy(x.target, address, 6);
++            x.have_target = 1;
++            d = dev_add(address);
++            if (d){ d->known = 1; known_save(); }
++            pcm_reset();
++            connected_name_request();
++            btstack_run_loop_remove_timer(&avrcp_timer);
++            btstack_run_loop_set_timer_handler(&avrcp_timer, &avrcp_connect_late);
++            btstack_run_loop_set_timer(&avrcp_timer, 1200);
++            btstack_run_loop_add_timer(&avrcp_timer);
++            btstack_run_loop_remove_timer(&hfp_timer);
++            btstack_run_loop_set_timer_handler(&hfp_timer, &hfp_connect_late);
++            btstack_run_loop_set_timer(&hfp_timer, 4000);
++            btstack_run_loop_add_timer(&hfp_timer);
++            printf("x45btsrc: audio link to %s open\n", bd_addr_to_str(address));
++            x_touch();
++            break;
++        }
++
++        case A2DP_SUBEVENT_STREAM_STARTED:
++            x.ss = SS_STARTED;
++            timer_start();
++            printf("x45btsrc: stream started\n");
++            x_touch();
++            break;
++
++        case A2DP_SUBEVENT_STREAMING_CAN_SEND_MEDIA_PACKET_NOW:
++            if (x.ss == SS_STARTED) send_media_packet();
++            break;
++
++        case A2DP_SUBEVENT_STREAM_SUSPENDED:
++            if (x.a2dp_up) x.ss = SS_OPEN;
++            sbc_storage_count = 0;
++            sbc_ready_to_send = 0;
++            pcm_reset();
++            printf("x45btsrc: stream suspended\n");
++            x_touch();
++            break;
++
++        case A2DP_SUBEVENT_STREAM_RELEASED:
++            x.ss = x.a2dp_up ? SS_OPEN : SS_NONE;
++            sbc_storage_count = 0;
++            sbc_ready_to_send = 0;
++            printf("x45btsrc: stream released\n");
++            x_touch();
++            break;
++
++        case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:
++            printf("x45btsrc: audio link closed\n");
++            x.a2dp_cid = 0;
++            x.a2dp_up = 0;
++            x.battery = -1;
++            x.hfp_up = 0;
++            x.abs_state = 0;
++            x.vol_hold = 0;
++            bmap_cid = 0;
++            btstack_run_loop_remove_timer(&bmap_timer);
++            btstack_run_loop_remove_timer(&hfp_timer);
++            btstack_run_loop_remove_timer(&vol_timer);
++            x.ss = SS_NONE;
++            encoder_ready = 0;
++            sbc_storage_count = 0;
++            sbc_ready_to_send = 0;
++            pcm_reset();
++            if (x.connecting){
++                x.connecting = 0;
++                if (!x.err[0]) set_error("the device closed the connection");
++            }
++            x_touch();
++            break;
++
++        default:
++            break;
++    }
++}
++
++/* ----------------------------------------------------------------------- commands --- */
++
++static char cmd_line[96];
++static unsigned cmd_len;
++
++static void run_command(char * line){
++    char * arg = strchr(line, ' ');
++    bd_addr_t addr;
++    if (arg){ *arg++ = 0; while (*arg == ' ') arg++; }
++    if (!strcmp(line, "scan")){
++        scan_start();
++    } else if (!strcmp(line, "stopscan")){
++        scan_stop();
++    } else if (!strcmp(line, "connect") && arg && sscanf_bd_addr(arg, addr)){
++        do_connect(addr);
++    } else if (!strcmp(line, "volume") && arg){
++        int v = atoi(arg);
++        if (v < 0) v = 0;
++        if (v > 100) v = 100;
++        if (v != x.vol){
++            x.vol = v;
++            if (x.abs_state == 2) abs_set();
++            x_touch();
++        }
++    } else if (!strcmp(line, "mute") && arg){
++        x.muted = atoi(arg) != 0;
++    } else if (!strcmp(line, "disconnect")){
++        x.have_auto = 0;   // a disconnect asked for is not undone by the call-again timer
++        x.connecting = 0;
++        if (x.a2dp_cid) a2dp_source_disconnect(x.a2dp_cid);
++        if (x.acl_up) gap_disconnect(x.acl_handle);
++        x_touch();
++    } else if (!strcmp(line, "forget") && arg && sscanf_bd_addr(arg, addr)){
++        struct dev * d = dev_find(addr);
++        if (x.have_target && memcmp(x.target, addr, 6) == 0 && (x.a2dp_up || x.acl_up)){
++            x.have_auto = 0;
++            if (x.a2dp_cid) a2dp_source_disconnect(x.a2dp_cid);
++            if (x.acl_up) gap_disconnect(x.acl_handle);
++        }
++        gap_drop_link_key_for_bd_addr(addr);
++        if (d){ d->known = 0; d->name_asked = 0; if (!d->heard) *d = devs[--ndev]; }
++        if (x.have_auto && memcmp(x.autoaddr, addr, 6) == 0) x.have_auto = 0;
++        known_save();
++        printf("x45btsrc: forgot %s\n", bd_addr_to_str(addr));
++        x_touch();
++    } else if (!strcmp(line, "auto") && arg){
++        if (sscanf_bd_addr(arg, addr)){
++            memcpy(x.autoaddr, addr, 6);
++            x.have_auto = 1;
++        } else {
++            x.have_auto = 0;
++        }
++        x_touch();
++    }
++}
++
++static void stdin_process(char c){
++    if (c == 4){   // the panel software went away: leave like on SIGINT
++        kill(getpid(), SIGINT);
++        return;
++    }
++    if (c == '\n' || c == '\r'){
++        cmd_line[cmd_len] = 0;
++        if (cmd_len) run_command(cmd_line);
++        cmd_len = 0;
++        return;
++    }
++    if (cmd_len < sizeof cmd_line - 1) cmd_line[cmd_len++] = c;
++}
++
++/* ----------------------------------------------------------------------- shutdown --- */
++
++/* port/libusb/main.c calls this first on SIGINT. The controller keeps its scan state when the host goes away,
++ * so: end the audio, drop the link, switch the scans off and reset the controller, then let the stack power down. */
++static void (*shutdown_done)(void);
++
++static void shutdown_finish(btstack_timer_source_t * ts){
++    UNUSED(ts);
++    shutdown_done();
++}
++
++static void shutdown_reset(btstack_timer_source_t * ts){
++    if (hci_can_send_command_packet_now()) hci_send_cmd(&hci_reset);
++    btstack_run_loop_set_timer_handler(ts, &shutdown_finish);
++    btstack_run_loop_set_timer(ts, 300);
++    btstack_run_loop_add_timer(ts);
++}
++
++void x45bt_prepare_shutdown(void (*done)(void));
++void x45bt_prepare_shutdown(void (*done)(void)){
++    shutdown_done = done;
++    x.have_auto = 0;
++    btstack_run_loop_remove_timer(&audio_timer);
++    btstack_run_loop_remove_timer(&auto_timer);
++    pcm_close();
++    scan_stop();
++    gap_discoverable_control(0);
++    gap_connectable_control(0);
++    if (x.a2dp_cid) a2dp_source_disconnect(x.a2dp_cid);
++    if (x.acl_up) gap_disconnect(x.acl_handle);
++    btstack_run_loop_set_timer_handler(&shutdown_timer, &shutdown_reset);
++    btstack_run_loop_set_timer(&shutdown_timer, 1200);
++    btstack_run_loop_add_timer(&shutdown_timer);
++}
++
++/* --------------------------------------------------------------------------- main --- */
++
++int btstack_main(int argc, const char * argv[]);
++int btstack_main(int argc, const char * argv[]){
++    UNUSED(argc);
++    (void) argv;
++
++    setvbuf(stdout, NULL, _IOLBF, 0);
++
++    // a headset that reconnects on its own is its own master/slave decision; do not push the role
++    hci_set_master_slave_policy(0);
++    hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
++
++    gap_set_security_level(LEVEL_2);
++    gap_set_minimal_service_security_level(LEVEL_2);
++    gap_ssp_set_enable(1);
++    gap_ssp_set_io_capability(SSP_IO_CAPABILITY_DISPLAY_YES_NO);
++    gap_ssp_set_authentication_requirement(SSP_IO_AUTHREQ_MITM_PROTECTION_NOT_REQUIRED_GENERAL_BONDING);
++    gap_ssp_set_auto_accept(0);
++    gap_set_bondable_mode(1);
++
++    l2cap_init();
++    sdp_init();
++#ifdef ENABLE_BLE
++    sm_init();
++#endif
++
++    a2dp_source_init();
++    a2dp_source_register_packet_handler(&a2dp_source_packet_handler);
++    {
++        avdtp_stream_endpoint_t * ep = a2dp_source_create_stream_endpoint(AVDTP_AUDIO, AVDTP_CODEC_SBC,
++                media_sbc_codec_capabilities, sizeof media_sbc_codec_capabilities,
++                media_sbc_codec_configuration, sizeof media_sbc_codec_configuration);
++        if (!ep){
++            printf("x45btsrc: not enough memory for the stream endpoint\n");
++            return 1;
++        }
++        avdtp_set_preferred_sampling_frequency(ep, RATE);
++        x.local_seid = avdtp_local_seid(ep);
++    }
++
++    x.battery = -1;
++    x.vol = x.hs_vol = -1;
++    rfcomm_init();
++    hfp_ag_init(1);
++    hfp_ag_init_supported_features(HFP_FEATURES);
++    hfp_ag_init_codecs(sizeof hfp_codecs, hfp_codecs);
++    hfp_ag_init_ag_indicators(7, hfp_ag_indicators);
++    hfp_ag_init_hf_indicators(2, hfp_hf_indicators);
++    hfp_ag_init_call_hold_services(5, hfp_hold_services);
++    hfp_ag_init_apple_identification("iPhone", 2);   // the name headsets look for before they tell their battery level; 2: battery reports
++    hfp_ag_register_packet_handler(&hfp_packet_handler);
++
++    avrcp_init();
++    avrcp_register_packet_handler(&avrcp_packet_handler);
++    avrcp_controller_init();   // avrcp.c hands every connection event to the controller's handler as well: it has to exist
++    avrcp_controller_register_packet_handler(&avrcp_packet_handler);
++    avrcp_target_init();
++    avrcp_target_register_packet_handler(&avrcp_target_packet_handler);
++
++    memset(sdp_a2dp_source_service_buffer, 0, sizeof sdp_a2dp_source_service_buffer);
++    a2dp_source_create_sdp_record(sdp_a2dp_source_service_buffer, sdp_create_service_record_handle(), AVDTP_SOURCE_FEATURE_MASK_PLAYER, NULL, NULL);
++    sdp_register_service(sdp_a2dp_source_service_buffer);
++
++    memset(sdp_avrcp_target_service_buffer, 0, sizeof sdp_avrcp_target_service_buffer);
++    avrcp_target_create_sdp_record(sdp_avrcp_target_service_buffer, sdp_create_service_record_handle(), AVRCP_FEATURE_MASK_CATEGORY_PLAYER_OR_RECORDER, NULL, NULL);
++    sdp_register_service(sdp_avrcp_target_service_buffer);
++
++    memset(hfp_sdp_buffer, 0, sizeof hfp_sdp_buffer);
++    hfp_ag_create_sdp_record_with_codecs(hfp_sdp_buffer, sdp_create_service_record_handle(), 1, "X45", 0, HFP_FEATURES,
++                                         sizeof hfp_codecs, hfp_codecs);
++    sdp_register_service(hfp_sdp_buffer);
++
++    memset(device_id_sdp_service_buffer, 0, sizeof device_id_sdp_service_buffer);
++    device_id_create_sdp_record(device_id_sdp_service_buffer, sdp_create_service_record_handle(), DEVICE_ID_VENDOR_ID_SOURCE_BLUETOOTH, BLUETOOTH_COMPANY_ID_BLUEKITCHEN_GMBH, 1, 1);
++    sdp_register_service(device_id_sdp_service_buffer);
++
++    gap_set_local_name("CocktailAudio-X45");
++    gap_set_class_of_device(0x200420);   // audio, car/hifi-ish: a source, not a speaker
++    gap_discoverable_control(0);          // nothing pairs with the unit: it is the one that calls
++    gap_connectable_control(1);           // but a paired headset that is switched on may call back
++    gap_set_default_link_policy_settings(LM_LINK_POLICY_ENABLE_ROLE_SWITCH);   // no sniff: the stream must not sleep
++    gap_set_allow_role_switch(true);
++
++    hci_event_callback_registration.callback = &hci_packet_handler;
++    hci_add_event_handler(&hci_event_callback_registration);
++
++    btstack_ring_buffer_init(&pcm_ring, pcm_storage, sizeof pcm_storage);
++    known_load();
++    status_write();
++    btstack_stdin_setup(stdin_process);
++
++    btstack_run_loop_set_timer_handler(&audio_timer, &audio_tick);
++    btstack_run_loop_set_timer(&audio_timer, TICK_MS);
++    btstack_run_loop_add_timer(&audio_timer);
++    pcm_try_open(&pcm_open_timer);
++
++    printf("x45btsrc: starting BTstack\n");
++    hci_power_control(HCI_POWER_ON);
++    return 0;
++}
+--- a/example/Makefile.inc
++++ b/example/Makefile.inc
+@@ -501,6 +501,9 @@
+ x45bt: ${CORE_OBJ} ${COMMON_OBJ} ${CLASSIC_OBJ} ${SDP_CLIENT} ${SBC_CODEC_OBJ} ${AVDTP_OBJ} avrcp.o avrcp_controller.o avrcp_target.o avrcp_cover_art_client.o  obex_srm_client.o goep_client.o obex_parser.o obex_message_builder.o btstack_resample.o btstack_sample_rate_compensation.o x45bt.c
+ 	${CC} $^ ${CFLAGS} ${LDFLAGS} -o $@
+ 
++x45btsrc: ${CORE_OBJ} ${COMMON_OBJ} ${CLASSIC_OBJ} ${SDP_CLIENT} ${SBC_CODEC_OBJ} ${AVDTP_OBJ} btstack_ring_buffer.o avrcp.o avrcp_controller.o avrcp_target.o hfp.o hfp_gsm_model.o hfp_ag.o x45btsrc.c
++	${CC} $^ ${CFLAGS} ${LDFLAGS} -o $@
++
+ avrcp_browsing_client: ${CORE_OBJ} ${COMMON_OBJ} ${CLASSIC_OBJ} ${SDP_CLIENT} ${AVRCP_OBJ} ${AVDTP_OBJ} avrcp_browsing_client.c
+ 	${CC} $^ ${CFLAGS} ${LDFLAGS} -o $@
+ 
+--- a/src/classic/hfp_ag.c
++++ b/src/classic/hfp_ag.c
+@@ -2557,6 +2557,12 @@
+     uint8_t status = ERROR_CODE_SUCCESS;
+ 
+     hfp_log_rfcomm_message("HFP_AG_RX", packet, size);
++    { /* x45: what the headset says, for the log of x45btsrc */
++        char t[100]; size_t n = size < sizeof t - 1 ? size : sizeof t - 1, i;
++        for (i = 0; i < n; i++) t[i] = (packet[i] >= 32 && packet[i] < 127) ? (char) packet[i] : 0x20;
++        t[n] = 0;
++        printf("x45btsrc: hfp rx %s\n", t);
++    }
+ #ifdef ENABLE_HFP_AT_MESSAGES
+     hfp_ag_emit_string_event_with_len(hfp_connection, HFP_SUBEVENT_AT_MESSAGE_RECEIVED, (char *) packet, size);
+ #endif

@@ -107,7 +107,8 @@ them the source of the GPL parts in it, which for this library is the archive th
 **Bluetooth.** BTstack is free for non-commercial use only. Selling a device or package that contains it needs a
 commercial licence from BlueKitchen. The headless Bluetooth sink `x45bt` is built from BTstack's
 `a2dp_sink_demo.c` with `patches/btstack-e385539-x45bt.c.patch` applied (see `scripts/bt.sh`), so it is a changed
-copy of BTstack code. Bluetooth can be left out of the build with `X45_SKIP=bluetooth`.
+copy of BTstack code. The Bluetooth output daemon `x45btsrc` is a new source file added to BTstack's example
+folder by `patches/btstack-e385539-x45btsrc.patch`, with a line of logging added to its HFP code. Bluetooth can be left out of the build with `X45_SKIP=bluetooth`.
 
 `src/tools/aicload.c` follows the firmware download sequence of the Linux driver for the AIC8800 chips, which is
 public. It contains no code of the driver beyond the protocol constants. The firmware blobs themselves are never in

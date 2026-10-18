@@ -152,11 +152,10 @@ Built, but not proven:
 
 Not done yet:
 
-- **The build scripts lag behind the unit.** Wi-Fi, Bluetooth output and artwork work on the unit this was developed
-  on, but the scripts here do not build everything for them yet. The kernel driver for the Wi-Fi stick has to be
-  built against the unit's own kernel, which the automated build does not do, so a package built from these scripts
-  has the Wi-Fi tools, screens and web tab but not the driver. The Bluetooth output daemon is not part of the build
-  scripts yet either. Until that is done, use the Ethernet port.
+- **The Wi-Fi driver is not built by the scripts.** Wi-Fi works on the unit this was developed on, but the kernel
+  driver for the Wi-Fi stick has to be built against the unit's own kernel, which the automated build does not do.
+  A package built from these scripts has the Wi-Fi tools, screens and web tab but not the driver. Until that is done,
+  use the Ethernet port.
 - **SSH.** The unit has an SSH server, and it works, but the package does not switch it on for you.
 - **HDMI output.** The unit has the port, and the panel is drawn on the built-in display only. Nobody has written
   the HDMI output yet.
