@@ -169,7 +169,7 @@ static void do_connect(int fd, struct x45_wifi *w, const char *body, size_t len)
 	field(body, len, "ssid", ssid, sizeof ssid);
 	field(body, len, "psk", psk, sizeof psk);
 	field(body, len, "hidden", hid, sizeof hid);
-	if (!ssid[0] || strlen(ssid) >= X45_WIFI_SSID) {
+	if (!ssid[0] || strlen(ssid) > 32) {   /* 32 bytes is what a network name can be */
 		answer(fd, 400, 0, "the network name is missing or too long");
 		return;
 	}
@@ -182,7 +182,8 @@ static void do_connect(int fd, struct x45_wifi *w, const char *body, size_t len)
 		if (is_off(id))   /* the same wording as the other endpoints */
 			answer(fd, 503, 0, "WiFi is off");
 		else
-			answer(fd, 400, 0, id == -EINVAL ? "that password cannot be right (8 to 63 characters)" : "could not save the network");
+			answer(fd, 400, 0, id == -EINVAL ? "that password cannot be right (8 to 63 characters)" :
+				id == -ENOSPC ? "16 networks are saved: forget one first" : "could not save the network");
 		return;
 	}
 	x45_wifi_scan(w);   /* so that "is it in range" below is answered from a fresh look */

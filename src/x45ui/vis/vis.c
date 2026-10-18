@@ -322,11 +322,14 @@ void vis_feed(struct ui *u)
 			all[i]->feed(u);
 }
 
-/* The large stereo field (Options > Visualizers): on the player it takes the box alone, whatever else is switched on,
- * and it is drawn even while the analyzer has nothing to say (a tube at rest, the text beside it keeps its place). */
+/* The large stereo field (Options > Visualizers): on the player it takes the box when it is the only visual switched on,
+ * and it is drawn even while the analyzer has nothing to say (a tube at rest, the text beside it keeps its place).
+ * With a second visual on, the page is the normal one and the stereo field shares the box with it, smaller. */
 int vis_big(const struct ui *u)
 {
-	return u->gon_big && u->gon_nobars && u->screen == SCR_PLAYER && (vis_get(u) & vis_gonio.bit) != 0;
+	unsigned mask = vis_get(u);
+
+	return u->gon_big && u->gon_nobars && u->screen == SCR_PLAYER && (mask & vis_gonio.bit) != 0 && (mask & ~vis_gonio.bit) == 0;
 }
 
 /* Whatever is switched on shares the box: one alone fills all of it, several split it by weight (each within

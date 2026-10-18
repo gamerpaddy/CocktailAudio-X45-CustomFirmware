@@ -235,6 +235,11 @@ $(OUT)/x45art: x45art/main.c libx45/stb_image.h | $(OUT)
 	@echo "--- $@"
 	@ls -l $@
 
+$(OUT)/x45wd: x45wd/main.c | $(OUT)
+	$(CC) $(CFLAGS) -o $@ x45wd/main.c $(LDFLAGS)
+	@echo "--- $@"
+	@ls -l $@
+
 # WiFi: the client library (talks to wpa_supplicant) and its command line.
 $(OUT)/x45wifi: x45wifi/main.c libx45/wifi.c libx45/wifi.h | $(OUT)
 	$(CC) $(CFLAGS) -o $@ x45wifi/main.c libx45/wifi.c $(LDFLAGS)
@@ -253,7 +258,7 @@ $(OUT)/%: tools/%.c | $(OUT)
 	@echo "--- $@"
 	@ls -l $@
 
-player: $(OUT)/x45play $(OUT)/x45loop $(OUT)/x45cd $(OUT)/x45tuner $(OUT)/x45rec $(OUT)/x45web $(OUT)/x45upnp $(OUT)/x45rb $(OUT)/x45wifi $(OUT)/x45art
+player: $(OUT)/x45play $(OUT)/x45loop $(OUT)/x45cd $(OUT)/x45tuner $(OUT)/x45rec $(OUT)/x45wd $(OUT)/x45web $(OUT)/x45upnp $(OUT)/x45rb $(OUT)/x45wifi $(OUT)/x45art
 
 test: $(OUT)/quad_test $(OUT)/font_test $(OUT)/clock_test $(OUT)/mpdc_test $(OUT)/fold_test $(OUT)/stations_test $(OUT)/arb_test $(OUT)/balance_test
 

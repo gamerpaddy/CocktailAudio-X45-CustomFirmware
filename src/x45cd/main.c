@@ -2,7 +2,10 @@
  *
  *   x45cd toc [dev]            print the table of contents
  *   x45cd play <track> [dev]   play from <track> to the end of the disc
- *   x45cd text [dev]           CD-Text: "T|P <track> <text>" (0 = album)
+ *   x45cd text [dev]           CD-Text plus the user's own tags: "K <track> <text>" (0 = album), see cmd_text
+ *   x45cd discid [dev]         the 8 hex digits that name the disc (its table of contents)
+ *   x45cd meta [dev]           JSON for the web page: id, tracks, CD-Text and own tags
+ *   x45cd setmeta [dev]        own tags from stdin (cdmeta/<id>.txt); nothing on stdin removes them
  *   x45cd eject|close [dev]    open / close the tray
  *   x45cd id [dev]             "<ntracks> <frames>" of the disc in the drive (exit 3: none)
  *
@@ -50,6 +53,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <sys/mount.h>
@@ -436,6 +440,11 @@ static int cmd_play(int track, const char *dev)
 	pid_t parent = getppid();
 	int follow = getenv("X45CD_FOLLOW_PARENT") != NULL;
 
+	/* the panel sends these keys without knowing how far the start-up is (TOC, HDCD scan, a disc's IFO files take
+	 * seconds): the default action would end the player, so the flags are taken from the first moment on */
+	signal(SIGUSR1, on_usr1);
+	signal(SIGUSR2, on_usr2);
+	signal(SIGHUP, on_hup);
 	fd = open(dev, O_RDONLY | O_NONBLOCK);
 	if (fd < 0) {
 		perror(dev);
@@ -977,28 +986,56 @@ static int cmd_tray(const char *dev, int open_it)
 	return 0;
 }
 
-/* CD-Text: READ TOC/PMA/ATIP, format 5. The disc stores 18-byte packs: type
- * (0x80 title, 0x81 performer), the track the first string belongs to, a
- * sequence number, a flags byte, 12 text bytes and a CRC. Strings are NUL
- * terminated and run on across packs; each NUL moves to the next track. Output:
- *   "T <track> <text>" for titles (track 0 = the album), "P <track> <text>" for
- * performers. Nothing is printed for a disc without CD-Text (exit 4). */
-static int cmd_text(const char *dev)
+/* CD-Text: READ TOC/PMA/ATIP, format 5. The disc stores 18-byte packs: type (0x80 title, 0x81 performer, 0x82
+ * songwriter, 0x83 composer, 0x84 arranger, 0x85 message, 0x8e UPC/EAN), the track the first string belongs to, a
+ * sequence number, a flags byte (double-byte flag, language block, character position), 12 text bytes and a CRC.
+ * Strings are NUL terminated and run on across packs; each NUL moves to the next track; a string that is only a tab
+ * means "the same as the track before". Only the first language block is read, and a block in a double-byte
+ * character set (Japanese discs) is skipped: its text is not ISO 8859-1.
+ *
+ * The user can add their own tags for a disc (the web page, `x45cd setmeta`): they live in
+ * /home/root/x45new/cdmeta/<disc id>.txt, one "K <track> <text>" line each, and win over the disc's own text, so a
+ * disc without CD-Text gets names, offline, and a disc with wrong text can be corrected.
+ *
+ * Output of `text`: "K <track> <text>" with K = T title (track 0 = the album), P performer, S songwriter,
+ * C composer, A arranger, M message, G genre (own tags only), U UPC/EAN. Nothing is printed for a disc with
+ * neither CD-Text nor own tags (exit 4). */
+#define CDMETA_DIR "/home/root/x45new/cdmeta"
+#define TXT_KINDS  "TPSCAMGU"
+#define NKIND      8
+#define TXT_LEN    256
+
+typedef char textset[NKIND][MAXTRK + 2][TXT_LEN];
+static textset g_disc, g_user;
+
+static int pack_kind(int type)
 {
-	static uint8_t buf[4096];
+	switch (type) {
+	case 0x80: return 0;
+	case 0x81: return 1;
+	case 0x82: return 2;
+	case 0x83: return 3;
+	case 0x84: return 4;
+	case 0x85: return 5;
+	case 0x8e: return 7;
+	}
+	return -1;
+}
+
+/* 0 when the disc has CD-Text */
+static int read_cdtext(const char *dev, textset ts)
+{
+	static uint8_t buf[16384];
 	uint8_t cdb[10] = { 0x43, 0, 5, 0, 0, 0, 0, sizeof buf >> 8, sizeof buf & 0xff, 0 };
 	uint8_t sense[32];
 	struct sg_io_hdr h;
-	char text[2][MAXTRK + 2][256];
-	int pos[2] = { 0, 0 }, trk[2] = { 0, 0 }, seen = 0;
+	int pos[NKIND] = { 0 }, trk[NKIND] = { 0 }, seen = 0;
 	int fd = open(dev, O_RDONLY | O_NONBLOCK), len, i, k;
 
-	if (fd < 0) {
-		perror(dev);
-		return 2;
-	}
+	memset(ts, 0, sizeof(textset));
+	if (fd < 0)
+		return -1;
 	memset(&h, 0, sizeof h);
-	memset(text, 0, sizeof text);
 	h.interface_id = 'S';
 	h.dxfer_direction = SG_DXFER_FROM_DEV;
 	h.cmd_len = sizeof cdb;
@@ -1009,9 +1046,8 @@ static int cmd_text(const char *dev)
 	h.sbp = sense;
 	h.timeout = 10000;
 	if (ioctl(fd, SG_IO, &h) < 0 || h.status != 0) {
-		fprintf(stderr, "x45cd: no CD-Text\n");
 		close(fd);
-		return 4;
+		return -1;
 	}
 	close(fd);
 	len = (buf[0] << 8 | buf[1]) + 2;
@@ -1019,10 +1055,10 @@ static int cmd_text(const char *dev)
 		len = sizeof buf;
 	for (i = 4; i + 18 <= len; i += 18) {
 		const uint8_t *pk = buf + i;
-		int t = pk[0] == 0x80 ? 0 : pk[0] == 0x81 ? 1 : -1;
+		int t = pack_kind(pk[0]);
 		int trk0 = pk[1] & 0x7f;
 
-		if (t < 0)
+		if (t < 0 || (pk[3] & 0x80) || ((pk[3] >> 4) & 7) != 0)
 			continue;
 		if (pos[t] == 0)
 			trk[t] = trk0;
@@ -1031,23 +1067,272 @@ static int cmd_text(const char *dev)
 
 			if (c == 0) {
 				if (trk[t] <= MAXTRK)
-					text[t][trk[t]][pos[t]] = '\0';
+					ts[t][trk[t]][pos[t]] = '\0';
 				trk[t]++;
 				pos[t] = 0;
-			} else if (trk[t] <= MAXTRK && pos[t] < 255) {
-				text[t][trk[t]][pos[t]++] = (char)c;
+			} else if (trk[t] <= MAXTRK && pos[t] < TXT_LEN - 1) {
+				ts[t][trk[t]][pos[t]++] = (char)(c < 32 && c != 9 ? ' ' : c);   /* no line feed into the line-based output */
 				seen = 1;
 			}
 		}
 	}
-	if (!seen) {
+	for (k = 0; k < NKIND; k++)
+		for (i = 1; i <= MAXTRK; i++)
+			if (ts[k][i][0] == '\t' && !ts[k][i][1])
+				memcpy(ts[k][i], ts[k][i - 1], TXT_LEN);
+	return seen ? 0 : -1;
+}
+
+/* the disc in the drive: its table of contents and the number that names it; 0 on success */
+static int disc_toc(const char *dev, struct toc *t, uint32_t *sig)
+{
+	int fd = open(dev, O_RDONLY | O_NONBLOCK), r;
+
+	if (fd < 0)
+		return -1;
+	r = read_toc(fd, t);
+	close(fd);
+	if (r < 0)
+		return -1;
+	*sig = toc_sig(t);
+	return 0;
+}
+
+static void meta_path(char *out, size_t cap, uint32_t sig)
+{
+	snprintf(out, cap, CDMETA_DIR "/%08x.txt", (unsigned)sig);
+}
+
+/* the user's lines "K <track> <text>" into ts; returns how many were taken */
+static int parse_lines(FILE *f, textset ts)
+{
+	char line[512];
+	int n = 0;
+
+	memset(ts, 0, sizeof(textset));
+	while (fgets(line, sizeof line, f)) {
+		const char *kp;
+		char *txt;
+		int tr, used;
+
+		line[strcspn(line, "\r\n")] = '\0';
+		if (!line[0] || line[1] != ' ' || !(kp = strchr(TXT_KINDS, line[0])))
+			continue;
+		tr = (int)strtol(line + 2, &txt, 10);
+		if (txt == line + 2 || *txt != ' ' || tr < 0 || tr > MAXTRK)
+			continue;
+		txt++;
+		for (used = 0; txt[used]; used++)
+			if ((unsigned char)txt[used] < 32)
+				txt[used] = ' ';
+		if (used > TXT_LEN - 8) {      /* cut by bytes, not in the middle of a character */
+			used = TXT_LEN - 8;
+			while (used > 0 && ((unsigned char)txt[used] & 0xc0) == 0x80)
+				used--;
+			txt[used] = '\0';
+		}
+		while (used > 0 && txt[used - 1] == ' ')
+			txt[--used] = '\0';
+		if (!used)
+			continue;
+		snprintf(ts[kp - TXT_KINDS][tr], TXT_LEN, "%s", txt);
+		n++;
+	}
+	return n;
+}
+
+static int load_user(uint32_t sig, textset ts)
+{
+	char path[128];
+	FILE *f;
+	int n;
+
+	memset(ts, 0, sizeof(textset));
+	meta_path(path, sizeof path, sig);
+	f = fopen(path, "r");
+	if (!f)
+		return 0;
+	n = parse_lines(f, ts);
+	fclose(f);
+	return n;
+}
+
+static int cmd_text(const char *dev)
+{
+	struct toc t;
+	uint32_t sig;
+	int have_disc = read_cdtext(dev, g_disc) == 0, have_user = 0, k, i;
+
+	if (disc_toc(dev, &t, &sig) == 0)
+		have_user = load_user(sig, g_user) > 0;
+	else
+		memset(g_user, 0, sizeof g_user);
+	if (!have_disc && !have_user) {
 		fprintf(stderr, "x45cd: no CD-Text\n");
 		return 4;
 	}
-	for (k = 0; k < 2; k++)
+	for (k = 0; k < NKIND; k++)
+		for (i = 0; i <= MAXTRK; i++) {
+			const char *s = g_user[k][i][0] ? g_user[k][i] : g_disc[k][i];
+
+			if (s[0])
+				printf("%c %d %s\n", TXT_KINDS[k], i, s);
+		}
+	return 0;
+}
+
+static int cmd_discid(const char *dev)
+{
+	struct toc t;
+	uint32_t sig;
+
+	if (disc_toc(dev, &t, &sig) < 0) {
+		fprintf(stderr, "x45cd: no disc / no toc\n");
+		return 3;
+	}
+	printf("%08x\n", (unsigned)sig);
+	return 0;
+}
+
+static int utf8_ok(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+
+	while (*p) {
+		int n = *p < 0x80 ? 0 : (*p & 0xe0) == 0xc0 ? 1 : (*p & 0xf0) == 0xe0 ? 2 : (*p & 0xf8) == 0xf0 ? 3 : -1;
+
+		if (n < 0)
+			return 0;
+		p++;
+		while (n--)
+			if ((*p++ & 0xc0) != 0x80)
+				return 0;
+	}
+	return 1;
+}
+
+/* a JSON string; text that is not valid UTF-8 is ISO 8859-1 (what CD-Text holds) */
+static void json_str(FILE *f, const char *s)
+{
+	int latin = !utf8_ok(s);
+	const unsigned char *p;
+
+	fputc('"', f);
+	for (p = (const unsigned char *)s; *p; p++) {
+		if (*p == '"' || *p == '\\')
+			fprintf(f, "\\%c", *p);
+		else if (*p < 32)
+			fputc(' ', f);
+		else if (*p >= 0x80 && latin)
+			fprintf(f, "%c%c", 0xc0 | *p >> 6, 0x80 | (*p & 0x3f));
+		else
+			fputc(*p, f);
+	}
+	fputc('"', f);
+}
+
+static void json_set(FILE *f, textset ts)
+{
+	int k, i, first_k = 1;
+
+	fputc('{', f);
+	for (k = 0; k < NKIND; k++) {
+		int first = 1;
+
+		for (i = 0; i <= MAXTRK; i++) {
+			if (!ts[k][i][0])
+				continue;
+			if (first)
+				fprintf(f, "%s\"%c\":{", first_k ? "" : ",", TXT_KINDS[k]);
+			fprintf(f, "%s\"%d\":", first ? "" : ",", i);
+			json_str(f, ts[k][i]);
+			first = first_k = 0;
+		}
+		if (!first)
+			fputc('}', f);
+	}
+	fputc('}', f);
+}
+
+/* For the web page: the disc's id and tracks, the CD-Text it carries and the user's own tags. */
+static int cmd_meta(const char *dev)
+{
+	struct toc t;
+	uint32_t sig;
+	int i, n = 0;
+
+	if (disc_toc(dev, &t, &sig) < 0) {
+		puts("{\"id\":\"\",\"tracks\":[]}");
+		return 3;
+	}
+	read_cdtext(dev, g_disc);
+	load_user(sig, g_user);
+	printf("{\"id\":\"%08x\",\"tracks\":[", (unsigned)sig);
+	for (i = t.first; i <= t.last; i++) {
+		printf("%s{\"n\":%d,\"audio\":%s,\"frames\":%d}", n++ ? "," : "", i, t.audio[i] ? "true" : "false",
+		       (int)(track_end(&t, i) - t.start[i]));
+	}
+	fputs("],\"cdtext\":", stdout);
+	json_set(stdout, g_disc);
+	fputs(",\"user\":", stdout);
+	json_set(stdout, g_user);
+	puts("}");
+	return 0;
+}
+
+/* stdin: an optional first line "id <disc id>" (refused when the disc in the drive is another one) and then the
+ * user's lines. No lines at all removes the tags of the disc. */
+static int cmd_setmeta(const char *dev)
+{
+	static char in[32768];
+	struct toc t;
+	uint32_t sig;
+	char path[128], tmp[140], *body = in;
+	FILE *f;
+	size_t got;
+	unsigned want;
+	int n, k, i;
+
+	if (disc_toc(dev, &t, &sig) < 0) {
+		fprintf(stderr, "x45cd: no disc\n");
+		return 3;
+	}
+	got = fread(in, 1, sizeof in - 1, stdin);
+	in[got] = '\0';
+	if (sscanf(in, "id %x", &want) == 1) {
+		char *nl = strchr(in, '\n');
+
+		if (want != sig) {
+			fprintf(stderr, "x45cd: the disc has changed\n");
+			return 5;
+		}
+		body = nl ? nl + 1 : in + got;
+	}
+	f = fmemopen(body, strlen(body) ? strlen(body) : 1, "r");
+	if (!f)
+		return 6;
+	n = parse_lines(f, g_user);
+	fclose(f);
+	meta_path(path, sizeof path, sig);
+	if (!n) {
+		unlink(path);
+		return 0;
+	}
+	mkdir(CDMETA_DIR, 0755);
+	snprintf(tmp, sizeof tmp, "%s.tmp", path);
+	f = fopen(tmp, "w");
+	if (!f) {
+		perror(tmp);
+		return 6;
+	}
+	for (k = 0; k < NKIND; k++)
 		for (i = 0; i <= MAXTRK; i++)
-			if (text[k][i][0])
-				printf("%c %d %s\n", k ? 'P' : 'T', i, text[k][i]);
+			if (g_user[k][i][0])
+				fprintf(f, "%c %d %s\n", TXT_KINDS[k], i, g_user[k][i]);
+	if (fclose(f) != 0 || rename(tmp, path) != 0) {
+		unlink(tmp);
+		return 6;
+	}
 	return 0;
 }
 
@@ -1064,6 +1349,12 @@ int main(int argc, char **argv)
 				argc > 4 ? argv[4] : "/dev/sr0");
 	if (argc >= 2 && !strcmp(argv[1], "text"))
 		return cmd_text(argc > 2 ? argv[2] : "/dev/sr0");
+	if (argc >= 2 && !strcmp(argv[1], "discid"))
+		return cmd_discid(argc > 2 ? argv[2] : "/dev/sr0");
+	if (argc >= 2 && !strcmp(argv[1], "meta"))
+		return cmd_meta(argc > 2 ? argv[2] : "/dev/sr0");
+	if (argc >= 2 && !strcmp(argv[1], "setmeta"))
+		return cmd_setmeta(argc > 2 ? argv[2] : "/dev/sr0");
 	if (argc >= 2 && !strcmp(argv[1], "eject"))
 		return cmd_tray(argc > 2 ? argv[2] : "/dev/sr0", 1);
 	if (argc >= 2 && !strcmp(argv[1], "close"))

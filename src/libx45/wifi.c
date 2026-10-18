@@ -580,6 +580,8 @@ int x45_wifi_connect(struct x45_wifi *w, const char *ssid, const char *psk, int 
 	for (i = 0; i < n; i++)
 		if (!strcmp(nets[i].ssid, ssid))
 			id = nets[i].id;
+	if (id < 0 && n >= 16)
+		return -ENOSPC;   /* every list and lookup stops at 16: more would be saved and never seen again */
 	if (id < 0) {
 		r = x45_wifi_cmd(w, "ADD_NETWORK", reply, sizeof reply);
 		if (r < 0)
@@ -718,8 +720,16 @@ int x45_wifi_power(int on)
 			dup2(nul, 2);
 		}
 		/* a grandchild, so that nobody has to wait for it */
-		if (fork() == 0)
+		if (fork() == 0) {
+			int fd;
+
+			if (nul > 2)
+				close(nul);
+			for (fd = 3; fd < 256; fd++)   /* the web client's socket must not end up in the long-lived daemons */
+				close(fd);
 			execl(X45_WIFI_RUN, "x45wifi-run", on ? "on" : "off", (char *)NULL);
+			_exit(127);
+		}
 		_exit(0);
 	}
 	{

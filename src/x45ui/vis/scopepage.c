@@ -10,6 +10,7 @@
  * the scope is the 440 px picture the box of a skin gives it. */
 #include "vis.h"
 #include "../skins/skin.h"
+#include "../ext/ext.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -53,6 +54,13 @@ void scope_page(struct ui *u, const struct ui_np *np)
 		x45_text_clipped(s, x0, y + 6, np->fmt, 2, cw, u->t.dim);
 
 	/* the lower part keeps its place from the foot, whatever is above it */
+	if (np->slide && np->slide == ui_art_image(u) && ui_art_small(u)) {   /* the picture of what plays, if it fits between */
+		const struct x45_image *pic = ui_art_small(u);
+		int top = y + (np->fmt[0] ? 36 : 6), lim = (np->msg && np->msg[0]) ? bottom - 188 : bottom - 138;
+
+		if (top + pic->h + 8 <= lim)
+			x45_image_draw(s, pic, x0, top + (lim - 8 - top - pic->h) / 2);
+	}
 	if (np->msg && np->msg[0])
 		text_fold(s, x0, bottom - 188, np->msg, 2, cw, np->msg_warn ? u->t.warn : u->t.dim);
 	if (np->time[0])

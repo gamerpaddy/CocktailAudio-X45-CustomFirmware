@@ -1,5 +1,5 @@
 /* Look tab: the skin (layout), the colours (accent, background, text) and the visualizers of the panel. Reads S.look
- * (the panel's state, see src/x45ui/main.c) and sends `skin NAME`, `theme N`, `ground N`, `ink N`, `vis NAME`, `specstyle N`, `bars N`.
+ * (the panel's state, see src/x45ui/main.c) and sends `skin NAME`, `theme N`, `ground N`, `ink N`, `vis NAME`, `specstyle N`, `bars N`, `artwork N`.
  * A new skin, colour or visual in the panel's source shows up here by itself. */
 (function(){
 "use strict";
@@ -50,6 +50,17 @@ function gonBlock(L){
     '" title="the scope almost fullscreen, the text a small column beside it (leaves the bars out)">almost fullscreen</button></div>';
 }
 
+/* the picture of what plays: where it may come from (S.options.artwork, S.options.artwork_modes) */
+function artBlock(){
+  const o = S && S.options;
+  if(!o || !o.artwork_modes) return "";
+  return '<h3 style="margin-top:16px">Artwork</h3><div class="row">' + o.artwork_modes.map((n, i) =>
+      '<button class="sw ' + (i === o.artwork ? "on" : "") + '" data-c="artwork ' + i + '">' + esc(n) + '</button>').join("") + '</div>' +
+    '<p class="dim" style="margin-top:8px">The cover of a track or the logo of a radio station, shown beside what plays. ' +
+    '"library only" uses what the files and their folders hold. "library and internet" also looks covers and logos up ' +
+    'on the internet, which sends the artist and title, or the station, to those services.</p>';
+}
+
 function draw(){
   const L = S && S.look;   /* S is the page's state (a top-level let of index.html) */
   if(!L) return '<p class="dim">loading...</p>';
@@ -61,6 +72,7 @@ function draw(){
     swatches("Background", L.grounds, L.ground, "ground") +
     swatches("Text colour", L.inks, L.ink, "ink") +
     visBlock(L) +
+    artBlock() +
     '<p class="dim" style="margin-top:14px">The skin sets how things are laid out; the colours are independent of it ("skin" keeps the skin\'s own). ' +
     'A light background gets dark text by itself. Everything here is kept across restarts.</p>';
 }

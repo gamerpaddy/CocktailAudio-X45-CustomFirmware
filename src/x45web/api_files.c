@@ -340,6 +340,23 @@ static int wr_begin(struct wr *w)
 	return 0;
 }
 
+/* The media helper leaves a disk read-write while this marker exists. It holds the pid of the process that made it, so a
+ * marker left behind by a killed one (a restart of the web server in the middle of a change) is not believed. */
+int hold_open(void)
+{
+	char b[16];
+	int fd = open(HOLD_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+
+	if (fd >= 0) {
+		int n = snprintf(b, sizeof b, "%d\n", (int)getpid());
+
+		if (write(fd, b, (size_t)n) < 0) {
+			/* an empty marker still holds: the helper only distrusts one that names a dead process */
+		}
+	}
+	return fd;
+}
+
 static int wr_add(struct wr *w, const struct root *r)
 {
 	char cmd[400];
@@ -353,7 +370,7 @@ static int wr_add(struct wr *w, const struct root *r)
 	if (w->n >= 3 || strncmp(r->dev, "/dev/sd", 7) || strpbrk(r->path, "'\\"))
 		return -EROFS;
 	if (w->hold < 0)
-		w->hold = open(HOLD_FILE, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);   /* the media helper leaves it be */
+		w->hold = hold_open();   /* the media helper leaves it be */
 	snprintf(cmd, sizeof cmd, "mount -o remount,rw '%s' >/dev/null 2>&1", r->path);
 	if (system(cmd) != 0)
 		return -EROFS;
@@ -803,9 +820,10 @@ static void ep_get(int fd, const char *method, const struct web_req *rq, const s
 	/* nothing of a file may run as part of this site; the PDF viewer of a browser is sandboxed already, and needs not be */
 	fprintf(f, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %lld\r\nAccept-Ranges: bytes\r\n%s"
 		"Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n%s"
-		"Access-Control-Allow-Origin: *\r\nContent-Disposition: %s; filename*=UTF-8''",
+		"%sContent-Disposition: %s; filename*=UTF-8''",
 		code, code == 206 ? "Partial Content" : "OK", ok ? type : "application/octet-stream", remaining, range_line,
-		ok && !strcmp(type, "application/pdf") ? "" : "Content-Security-Policy: sandbox\r\n", ok ? "inline" : "attachment");
+		ok && !strcmp(type, "application/pdf") ? "" : "Content-Security-Policy: sandbox\r\n",
+		web_cors ? "Access-Control-Allow-Origin: *\r\n" : "", ok ? "inline" : "attachment");
 	pct(f, name);
 	fputs("\r\nConnection: close\r\n\r\n", f);
 	fclose(f);
@@ -992,10 +1010,11 @@ static void ep_put(int fd, const struct web_req *rq, const struct root *roots, i
 			if (bad || left <= 0)
 				break;
 			{
-				ssize_t r = read(fd, buf, left < IO_BUF ? (size_t)left : IO_BUF);
+				ssize_t r;
 
-				if (r < 0 && errno == EINTR)
-					continue;
+				do {   /* not `continue`: that would write the chunk before once more */
+					r = read(fd, buf, left < IO_BUF ? (size_t)left : IO_BUF);
+				} while (r < 0 && errno == EINTR);
 				if (r <= 0) {
 					bad = EIO, gone = 1;   /* the sender went away or stalled */
 					break;
@@ -1125,6 +1144,14 @@ static void ep_op(int fd, const struct root *roots, int nroots, const char *quer
 			continue;
 		}
 		np++;
+	}
+	if (i == MAX_OPS) {   /* more were asked for than one operation takes: say so instead of doing the first part only */
+		char more[PATH_MAX];
+
+		if (qget(query, "p", MAX_OPS, more, sizeof more)) {
+			json_msg(fd, 413, "too many items selected (500 at most)");
+			goto out;
+		}
 	}
 	if (!np && !res.failed) {
 		json_msg(fd, 400, "no path");
@@ -1299,6 +1326,7 @@ struct tally {
 	unsigned long long files, dirs, bytes;
 	long left;
 	int cut;
+	time_t stop;   /* a slow disk must not hold a web process for minutes */
 };
 
 static void tally_walk(const char *path, struct tally *t, int depth)
@@ -1322,7 +1350,8 @@ static void tally_walk(const char *path, struct tally *t, int depth)
 
 		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
 			continue;
-		if (--t->left < 0) {
+		if (--t->left < 0 || ((t->left & 255) == 0 && time(NULL) > t->stop)) {
+			t->left = -1;
 			t->cut = 1;
 			break;
 		}
@@ -1334,10 +1363,11 @@ static void tally_walk(const char *path, struct tally *t, int depth)
 
 static void ep_size(int fd, const struct root *roots, int nroots, const char *query)
 {
-	struct tally t = { 0, 0, 0, 300000, 0 };
+	struct tally t = { 0, 0, 0, 300000, 0, 0 };
 	char p[PATH_MAX], real[PATH_MAX], out[200];
 	int i, rc;
 
+	t.stop = time(NULL) + 20;
 	for (i = 0; qget(query, "p", i, p, sizeof p); i++) {
 		rc = resolve(roots, nroots, p, 1, real, NULL);
 		if (rc) {
@@ -1605,8 +1635,10 @@ static void zip_add(struct zip *z, const char *path, const char *arc, int depth)
 		put16(h + 30 + 0, 0x0001);   /* the zip64 field: sizes still unknown, zero */
 		put16(h + 30 + 2, 16);
 	}
-	zw(z, h, 30 + (z->z64 && !en->dir ? 20 : 0));
+	zw(z, h, 30);
 	zw(z, en->name, nl);
+	if (z->z64 && !en->dir)
+		zw(z, h + 30, 20);   /* the extra field follows the name */
 
 	if (en->dir) {
 		DIR *d = opendir(path);
@@ -1754,6 +1786,12 @@ static void ep_zip(int fd, const struct root *roots, int nroots, const char *que
 		}
 		snprintf(src[np++], PATH_MAX, "%s", real);
 	}
+	if (i == MAX_OPS) {
+		if (qget(query, "p", MAX_OPS, p, sizeof p)) {
+			json_msg(fd, 413, "too many items selected (500 at most)");
+			goto out;
+		}
+	}
 	if (!np) {
 		json_msg(fd, 400, "no path");
 		goto out;
@@ -1779,8 +1817,9 @@ static void ep_zip(int fd, const struct root *roots, int nroots, const char *que
 		if (!f)
 			goto out;
 		fprintf(f, "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nCache-Control: no-store\r\n"
-			"X-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: *\r\n"
-			"Content-Disposition: attachment; filename=\"%s\"; filename*=UTF-8''", fname);
+			"X-Content-Type-Options: nosniff\r\n%s"
+			"Content-Disposition: attachment; filename=\"%s\"; filename*=UTF-8''",
+			web_cors ? "Access-Control-Allow-Origin: *\r\n" : "", fname);
 		pct(f, name);
 		fputs("\r\nConnection: close\r\n\r\n", f);
 		fclose(f);
@@ -1853,6 +1892,15 @@ static char *form_params(int fd, const struct web_req *rq, const char *query)
 		json_msg(fd, 400, "the request broke off");
 		free(all);
 		return NULL;
+	}
+	/* a form posted by the browser (the zip download) writes a space as '+'; a real plus arrives as %2B. The query
+	 * part before the body keeps a '+' as it is. */
+	{
+		size_t k;
+
+		for (k = ql; k < ql + got; k++)
+			if (all[k] == '+')
+				all[k] = ' ';
 	}
 	return all;
 }

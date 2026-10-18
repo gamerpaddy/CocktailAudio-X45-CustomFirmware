@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdio.h>
 
+extern int web_cors;   /* the answers carry the open CORS headers (see main.c); the modules that write their own headers test it */
 void respond(int fd, int code, const char *type, const void *body, size_t len);
 void respond_text(int fd, int code, const char *text);
 void respond_json(int fd, int code, const char *json);
@@ -15,6 +16,10 @@ void jesc(FILE *f, const char *text);   /* a JSON string, quotes included */
  * To add a module: write api_NAME.c, declare it here, add the call to the table in main.c and the
  * file to the x45web rule in the Makefile. */
 int api_wifi(int fd, const char *method, const char *path, const char *body, size_t len);
+int api_songlog(int fd, const char *method, const char *path, const char *body, size_t len);
+int api_cd(int fd, const char *method, const char *path, const char *body, size_t len);
+int api_health(int fd, const char *method, const char *path, const char *body, size_t len);
+int api_access(int fd, const char *method, const char *path, const char *body, size_t len);
 
 /* A request whose body is not buffered whole (uploads): the headers, and what of the body came with them.
  * The module reads the rest from `fd` itself. */
@@ -44,6 +49,7 @@ static inline int path_has_dotdot(const char *p)
 /* libsync.c: what the file manager changed is made known to MPD a few seconds after the last change.
  * libsync_note: a folder was touched (a real path on a disk); libsync_kick: the changes of this request are done.
  * `conn` is the client's socket, closed in the background worker that is started. */
+int hold_open(void);   /* api_files.c: makes /tmp/x45media.hold (with our pid in it); close the fd and unlink the file when done */
 void libsync_note(const char *dir);
 void libsync_kick(int conn);
 /* libsync_gone: the library path (HDD4/Album/01.flac) was deleted; the panel drops it from its list at once and stops

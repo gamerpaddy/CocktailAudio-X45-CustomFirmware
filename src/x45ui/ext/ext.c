@@ -3,17 +3,36 @@
  * To add a screen: write ext/NAME.c with a `const struct ui_ext ext_NAME`, then list it below. */
 #include "ext.h"
 
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 extern const struct ui_ext ext_wifi;
 extern const struct ui_ext ext_search;
 extern const struct ui_ext ext_balance;
+extern const struct ui_ext ext_art;
+extern const struct ui_ext ext_btout;
+extern const struct ui_ext ext_clock;
+extern const struct ui_ext ext_sleep;
+extern const struct ui_ext ext_songlog;
+extern const struct ui_ext ext_path;
+extern const struct ui_ext ext_heartbeat;
+extern const struct ui_ext ext_childlock;
 
 static const struct ui_ext *const all[] = {
 	&ext_wifi,
 	&ext_search,
 	&ext_balance,
+	&ext_art,
+	&ext_btout,
+	&ext_clock,
+	&ext_sleep,
+	&ext_songlog,
+	&ext_path,
+	&ext_heartbeat,
+	&ext_childlock,
 };
 #define NEXT ((int)(sizeof all / sizeof *all))
 
@@ -36,9 +55,14 @@ long ext_now_ms(void)
 	return ((long)ts.tv_sec - base_s) * 1000L + ts.tv_nsec / 1000000L;
 }
 
+/* The age of a stamp. The clock is a 32-bit long: a stamp that is 0, or was taken more than 24.8 days ago, differs from
+ * now by more than 2^31 and reads as negative. A difference below -1 h is such an old stamp (nothing is scheduled that far
+ * ahead with it), and it is long ago. */
 long ext_since(long now, long t)
 {
-	return (long)((unsigned long)now - (unsigned long)t);
+	long d = (long)((unsigned long)now - (unsigned long)t);
+
+	return d < -3600000L ? LONG_MAX : d;
 }
 
 /* ------------------------------------------------------------------ routing --- */
@@ -54,6 +78,8 @@ static void left(struct ui *u)
 
 void ui_ext_open(struct ui *u, const struct ui_ext *e)
 {
+	if (!e || !e->draw)   /* a service without a screen (art, heartbeat): there is nothing to show, and no title to draw */
+		return;
 	if (u->screen != SCR_EXT) {
 		ret_screen = u->screen;
 		ret_sel = u->sel;
@@ -73,7 +99,7 @@ int ui_ext_open_name(struct ui *u, const char *name)
 	int i;
 
 	for (i = 0; i < NEXT; i++)
-		if (!strcmp(all[i]->name, name)) {
+		if (!strcmp(all[i]->name, name) && all[i]->draw) {
 			ui_ext_open(u, all[i]);
 			return 0;
 		}
@@ -170,6 +196,81 @@ int ui_ext_badges(struct ui *u, int right)
 		if (all[i]->badge && (w = all[i]->badge(u, right)) > 0)
 			right -= w + 20;
 	return right;
+}
+
+void ui_ext_state(struct ui *u, FILE *f)
+{
+	int i;
+
+	for (i = 0; i < NEXT; i++)
+		if (all[i]->json) {
+			fprintf(f, ",\"%s\":", all[i]->name);
+			all[i]->json(u, f);
+		}
+}
+
+int ui_ext_cmd(struct ui *u, const char *name, const char *args)
+{
+	int i;
+
+	for (i = 0; i < NEXT; i++)
+		if (all[i]->cmd && !strcmp(all[i]->name, name) && all[i]->cmd(u, args)) {
+			u->dirty = 1;
+			return 1;
+		}
+	return 0;
+}
+
+int ui_ext_filter(struct ui *u, const struct x45_event *ev)
+{
+	int i;
+
+	for (i = 0; i < NEXT; i++)
+		if (all[i]->filter && all[i]->filter(u, ev))
+			return 1;
+	return 0;
+}
+
+int ext_conf_get(const char *key, char *out, size_t cap)
+{
+	char line[1100];
+	size_t kl = strlen(key);
+	FILE *f = fopen("/home/root/x45new/etc/x45ui.conf", "r");
+	int found = 0;
+
+	if (!f)
+		return 0;
+	while (fgets(line, sizeof line, f)) {
+		char *k = line, *v, *e;
+
+		while (*k == ' ' || *k == '\t')
+			k++;
+		if (*k == '#' || strncmp(k, key, kl))
+			continue;
+		v = k + kl;
+		while (*v == ' ' || *v == '\t')
+			v++;
+		if (*v != '=')
+			continue;
+		v++;
+		while (*v == ' ' || *v == '\t')
+			v++;
+		e = v + strcspn(v, "\r\n");
+		while (e > v && (e[-1] == ' ' || e[-1] == '\t'))
+			e--;
+		*e = '\0';
+		snprintf(out, cap, "%s", v);
+		found = 1;   /* the last one wins, as in main.c */
+	}
+	fclose(f);
+	return found;
+}
+
+int ext_conf_int(const char *key, int def)
+{
+	char v[32];
+
+	return ext_conf_get(key, v, sizeof v) ? atoi(v) : def;
 }
 
 int ui_ext_menu_count(void)

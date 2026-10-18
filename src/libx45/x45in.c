@@ -106,7 +106,7 @@ static void sampler_stat(int64_t t0, int64_t t1, long samples, long edges, long 
 	if (!f)
 		return;
 	fprintf(f, "burst %ld ms  reads %ld (%ld per s)  edges %ld  steps %ld  two-state jumps %ld\n",
-		ms, samples, samples * 1000 / ms, edges, ticks, diag);
+		ms, samples, (long)((long long)samples * 1000 / ms), edges, ticks, diag);
 	fclose(f);
 }
 

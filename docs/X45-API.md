@@ -1,6 +1,10 @@
 # X45 control API
 
-Base URL `http://<unit>/api/v1/...` (`/api/...` is the same thing). CORS is open.
+Base URL `http://<unit>/api/v1/...` (`/api/...` is the same thing). Cross-site use from a web page is off: no CORS
+headers, a foreign `Host` and a POST/PUT with a foreign `Origin` answer 403 (curl and apps send no `Origin` and are not
+affected); `web_cross_site = on` in `etc/x45ui.conf` brings the open CORS back. A request has 20 s to arrive in full
+(slow senders are dropped), an address is at most 2047 bytes (414), `POST /cmd` at most 4094 bytes of body (413),
+`/stream.mjpg` at most 4 viewers at once.
 Optional token: put `web_token = SECRET` in `etc/x45ui.conf`; every POST then needs
 `Authorization: Bearer <token>` (or `X-Token: <token>`). GETs stay open.
 
@@ -12,6 +16,7 @@ Optional token: put `web_token = SECRET` in `etc/x45ui.conf`; every POST then ne
 | `GET /meter` | live analyzer `{"seq","rate","l":[rms,peak],"r":[rms,peak],"b":[128 bands dBFS, 20 Hz-20 kHz log-spaced]}` or `{"ok":false}`. Calling it switches the analyzer on (stays on ~6 s after the last call). Available on line in/aux/phono/AES/coax/optical, FM/DAB, and network playback, PC USB and CD; AirPlay/Spotify unverified |
 | `GET /screen.bmp` | what the panel shows |
 | `GET /slide` | current DAB slideshow picture |
+| `GET /art` | the picture of what plays (a cover or a station logo, a BMP of at most 300 px), 404 when there is none; `/state` carries `art`, a counter that changes with the picture (0 when there is none) |
 
 ## Write
 `POST /cmd` with one or more command lines in the body:
@@ -37,7 +42,9 @@ tuner tune <10 kHz units>  tuner step <+-units>  tuner seek up|down  tuner fmsca
 tuner fmadd                tuner fmdel <10 kHz units>  tuner scan (DAB)  tuner select <n>  tuner cancel (stop a scan)
 rec toggle                 cd eject
 ripfmt flac|mp3|mp3v0     the file format of CD rips (kept); /state: options.rip_format, options.rip_formats [{name,label}]
+artwork 0|1|2             where the picture of what plays may come from: 0 off, 1 the library only, 2 also the internet (kept); /state: options.artwork, options.artwork_modes
 bt pair|forget|yes|no      Bluetooth input only: open for pairing, forget all devices, accept/refuse a pairing request
+btout on|off|scan|stopscan|connect ADDR|disconnect|forget ADDR   Bluetooth output: MPD's sound to a headset (X45-BLUETOOTH.md); /state: btout {on, active, state starting|ready|scanning|connecting|connected|streaming, name, target, auto, connected, streaming, scanning, routed, error, devices [{addr,name,known,connected,rssi,heard}]}
 ```
 
 Input numbers: 0 network, 1 fm, 2 pc usb, 3 aes ebu, 4 coaxial, 5 optical, 6 line in, 7 aux in, 8 phono, 9 cd, 10 dab, 11 bluetooth.
@@ -148,3 +155,48 @@ change the link it is on: `connect`, `join`, `forget`, `disconnect`, `reconnect`
 `auto` flag and switching WiFi on stay allowed). The web page's WiFi tab shows a note instead, and does everything when it
 is opened over the cable. UPnP: a control point's Stop leaves a song alone that the panel or the web page queued after it
 (patched upmpdcli, `patches/upmpdcli-stop-own.patch`).
+
+## Clock, sleep timer, song log, signal path (added 2026-10-15)
+`GET /state` carries a key for each screen of `src/x45ui/ext` that has state:
+
+| Key | Content |
+|---|---|
+| `clock` | `{"valid","epoch","offset","zone","action":"standby\|off","bar","idle","h24","secs","sleep":{"minutes","running","fading","left","asleep"},"presets":[..],"idles":[..]}`; `valid` is 0 while the system clock was never set (a year before 2025) |
+| `songlog` | `{"on","count","marked","last"}` (the lines themselves: `GET /songlog`) |
+| `childlock` | `{"locked":0\|1,"volume":0\|1}` |
+| `rec` | now also `bad` (sectors a rip could not read), `dir` (folder of the rip), `msg` |
+
+Commands (`POST /cmd`, one line each, `<screen> <args>`):
+
+```
+clock sleep N|off          sleep timer in minutes (off cancels); the volume fades over its last 30 s
+clock action standby|off   what the end of the timer does: stop and sleep (backlight down), or shut the unit down
+clock bar 0|1              show the remaining time in the top bar
+clock idle SECONDS         show the clock after this long idle (0 = never)
+clock h24 0|1   clock secs 0|1
+clock open | dark          open the clock screen / put the backlight down
+clock set EPOCH            set the system clock
+songlog mark ID | unmark ID | now | clear | log 0|1 | open
+childlock 1|0              lock / unlock the panel and the remote (web page and apps are never locked out)
+childlock volume 0|1       keep volume knob / remote volume keys working while locked
+childlock probe KIND PRESSED   test aid: runs a hardware event through the filter (okkey okir power knob vol volir web);
+                           the answer lands in /tmp/x45childlock.probe
+```
+
+| Request | Returns |
+|---|---|
+| `GET /songlog` | `{"entries":[{"id","t","mark","src":"net\|dab\|fm","station","text"}]}`, newest first; `t` is 0 when the clock was not set. Nothing is looked up anywhere |
+| `GET /cd/meta` | the disc in the drive: id, tracks, `cdtext` (what the disc carries) and `user` (what was typed here) |
+| `POST /cd/meta` | optional first line `id <disc id>`, then `K <track> <text>` lines (K = T P S C A M G U; track 0 = the disc); an empty body removes the user tags |
+| `GET /cd/riplog` | `rip log.txt` of the last rip's folder |
+
+## Health, logs, access (added 2026-10-15; see X45-RELIABILITY.md)
+| Request | Returns |
+|---|---|
+| `GET /health` | `{"up","load","mem","temps":[{"zone","c"}],"disks":[{"mount","fs","total_mb","free_mb"}],"net","procs","wd":{..}\|null,"stack":{"bootcount","enabled","childlock","watchdog_off"},"crashes":[[time,who,what]],"boots":[[time,who,what]]}`, histories newest first |
+| `GET /logs` | the logs there are, with sizes and which old runs (`.1`, `.2`) exist |
+| `GET /logs/NAME[.1\|.2][/N]` | the last N lines of a log; NAME is one of stack, ui, web, wd, crashes, boots, mpd, upnp, airplay, spotify, or `kernel` (dmesg); any other name is 404 |
+| `GET /access` | `{"protected":true\|false}` |
+| `POST /access` | body = the new token (4..64 of `A-Za-z0-9._~-`), or empty to remove it; needs the old token as `Bearer` when one is set; 400 for an invalid token |
+
+With a token set, `/logs*` needs it too (`Bearer` or `?tok=`); the other GETs stay open (a read-only guest view).

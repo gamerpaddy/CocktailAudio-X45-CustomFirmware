@@ -39,7 +39,8 @@ static int ifo_title(const uint8_t *d, size_t len, size_t ptt, size_t pgcit, int
 		return -1;
 	t->nch = 0;
 	t->ms = 0;
-	for (k = 0; from + 4 * (size_t)(k + 1) <= to && t->nch < DVD_MAXCH; k++) {
+	/* a title has 99 chapters at most: a hostile table must not make the loop run over a megabyte of entries */
+	for (k = 0; k < 99 && from + 4 * (size_t)(k + 1) <= to && t->nch < DVD_MAXCH; k++) {
 		int pgcn = (int)be16(d + from + 4 * (size_t)k), pgn = (int)be16(d + from + 4 * (size_t)k + 2);
 		size_t srp, p, pm, cp;
 		uint32_t po;
@@ -69,14 +70,19 @@ static int ifo_title(const uint8_t *d, size_t len, size_t ptt, size_t pgcit, int
 			continue;
 		first = d + cp + 24 * (size_t)(entry - 1);
 		last = d + cp + 24 * (size_t)(next - 2);
-		for (c = entry; c < next; c++)
-			ms += ptime_ms(d + cp + 24 * (size_t)(c - 1) + 4);
 		if (be32(last + 20) < be32(first + 8))
 			continue;
+		for (c = entry; c < next; c++) {
+			ms += ptime_ms(d + cp + 24 * (size_t)(c - 1) + 4);
+			if (ms > 0x3fffffff)   /* 255 cells of up to 168 hours would wrap an int */
+				ms = 0x3fffffff;
+		}
 		t->ch[t->nch].first = (int32_t)be32(first + 8);
 		t->ch[t->nch].last = (int32_t)be32(last + 20);
 		t->ch[t->nch].ms = ms;
 		t->ms += ms;
+		if (t->ms > 0x3fffffff)
+			t->ms = 0x3fffffff;
 		t->nch++;
 	}
 	return t->nch > 0 ? 0 : -1;
@@ -139,6 +145,8 @@ static int parse_ifo(const uint8_t *d, size_t len, struct dvd_title *out, int pl
 	if (ptt == 0 || pgcit == 0 || ptt + 8 > len || pgcit + 8 > len)
 		return -1;
 	nt = (int)be16(d + ptt);
+	if (nt > 99)   /* a VTS has 99 titles at most */
+		nt = 99;
 	if (nt < 1 || ptt + 8 + 4 * (size_t)nt > len)
 		return -1;
 	memset(&b, 0, sizeof b);

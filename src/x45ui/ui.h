@@ -50,6 +50,9 @@ struct ui {
 	int input;
 	int out_lineout, out_xlr, out_hp;
 	int hp_seen, spk_volume;
+	int bt_vol;       /* the level kept for the Bluetooth headset (btout_volume), -1 not set yet */
+	int bt_swap;      /* the sound goes to the headset: `volume` is its level and the speaker level waits in bt_spk */
+	int bt_spk;
 	int dirty;
 
 	/* live hardware readings, refreshed once a second */
@@ -92,6 +95,12 @@ struct ui {
 	struct { char url[MPDC_PATH_MAX]; char name[96]; } *ctx;   /* the stations of the folder the playing one came from */
 	int ctx_n;
 	char play_url[512], play_name[96];   /* the station chosen last: MPD has no name for it until the stream connects */
+	/* stream_watch(): an internet radio stream that stopped delivering is started again */
+	int sw_want;            /* a live stream was seen playing and nobody has stopped or paused it since */
+	int sw_tries;           /* restarts since it last played for a while */
+	double sw_el;           /* the elapsed time seen last (-1: not yet) */
+	long sw_t, sw_retry_t;  /* when the elapsed time last moved / when the stream was last restarted */
+	char sw_url[512];       /* what to start again */
 	volatile int p_refresh;   /* the owner just changed what plays: the poller reads the song again at once */
 	long song_hold;           /* until then the snapshots are older than that change: ignored */
 	unsigned p_seq, p_seen;
@@ -99,6 +108,7 @@ struct ui {
 	struct mpdc_song p_song;
 	int mpd_alive;          /* the last look at MPD got an answer */
 	long vol_again_t;       /* send the volume once more at this time */
+	long vol_fade_t;        /* the sleep timer's fade last moved the output level then: MPD's level is not the owner's meanwhile */
 	int tu_retries;         /* automatic restarts of a tuner that did not come up */
 	int tu_unclean;         /* the last tuner process was cut off before it was up */
 	int scrolling;           /* the frame just drawn has a text that runs: keep redrawing */
@@ -154,7 +164,8 @@ struct ui {
 	long rec_poll;
 	char rec_state[12];
 	long rec_secs;
-	int rec_track, rec_tracks;
+	int rec_track, rec_tracks, rec_bad;      /* rec_bad: unreadable sectors of the rip so far */
+	char rec_msg[120], rec_dir[300];        /* the last rip's remark (unreadable sectors) and its folder */
 
 	/* analyzer feed for the web meters when the panel meter is not running */
 	pid_t sp_pid;
@@ -225,6 +236,10 @@ struct ui {
 	char tu_rt[72], tu_time[40];   /* RDS radiotext, ensemble clock */
 	int tu_slide, slide_seen;      /* x45tuner's picture counter, and the one loaded */
 	struct x45_image slide;        /* current DAB slideshow picture */
+	int art_mode;                  /* picture of what plays: 0 none, 1 from the library only, 2 also from the internet (ext/art.c) */
+	struct x45_image art;          /* that picture, px NULL when there is none */
+	struct x45_image art_small;    /* and the same smaller, for the page of the large stereo field */
+	int art_serial;                /* counts its changes (the web page reloads it when this moves) */
 	int cd_loading;              /* the disc is being read (shown instead of a frozen screen) */
 	int bl_edit;                 /* options: the knob is adjusting the brightness */
 	long in_t;                   /* input list: last activity; the highlighted input is chosen 3 s later */
@@ -264,7 +279,8 @@ struct ui {
 	int rb_steps;               /* knob clicks that stretch the rubber band, 1 = every click skips */
 	int scr_off_s;              /* screen off after this many idle seconds, 0 = never */
 	int scr_dark;               /* the backlight is down */
-	long act_t;                 /* last activity */
+	long act_t;                 /* last activity (a key, a web command, but also a new track: it lights the screen) */
+	long touch_t;               /* the last time a person touched the unit: a key or a web command, nothing automatic */
 	int resume;                 /* come back on the last input and radio station at start-up */
 	int rip_fmt;                /* file format of a CD rip: 0 FLAC, 1 MP3 320 kbps, 2 MP3 V0 (rip_fmt_arg) */
 	char resume_url[500];       /* its stream address */
@@ -313,7 +329,17 @@ void save_config_key(const char *key, const char *val);
 /* the balance (main.c): clamped to the range, sent to the DAC at once; `save` keeps it in the configuration (a screen
  * that is stepped through saves once, when it is left, not on every click) */
 void ui_set_balance(struct ui *u, int balance, int save);
+const char *ui_station_name(struct ui *u);   /* the playing internet radio station as the list names it, or "" */
 int ui_volume_locked(const struct ui *u);   /* fixed outputs: the level is not the owner's to change (the balance still works) */
+
+/* what the clock and the sleep timer (ext/clock.c) need of main.c */
+void ui_screen_dark(struct ui *u);          /* the backlight goes down; any key brings it back */
+void ui_set_mute(struct ui *u, int on);     /* the flag and the hardware together */
+void ui_stop_playing(struct ui *u);         /* what plays on this input stops (the inputs that play in hardware only keep going) */
+void ui_power_off(struct ui *u);            /* shut the unit down, as the second press of POWER does */
+int ui_level_scale(struct ui *u, int pct);  /* the output at pct percent of the volume, not kept; 0: the volume is fixed, nothing done */
+void ui_level_restore(struct ui *u);        /* the volume the owner set goes back to the output */
+const char *ui_input_label(const struct ui *u);   /* the input as the top bar names it */
 
 /* the station search (ext/search.c): what the current input knows by name, and playing one of it */
 enum { STN_LIST, STN_FAV, STN_ROUTER, STN_DAB, STN_FM, STN_WEB };   /* STN_LIST: the radio list the search was opened from */

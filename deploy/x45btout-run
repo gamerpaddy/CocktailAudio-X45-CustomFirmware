@@ -1,0 +1,54 @@
+#!/bin/sh
+# Started by the panel software (ext/btout.c) when the Bluetooth output is switched on. Brings the USB radio stick up
+# (flip -> firmware load -> HCI), then becomes x45btsrc, the A2DP source that sends MPD's "bluetooth" output to a
+# headset. The panel keeps our stdin open as its command channel. Failures go to the status file the panel reads
+# while x45btsrc is not running.
+ROOT=/home/root/x45new
+BIN=$ROOT/bin
+BT=$ROOT/bt
+ST=/tmp/x45btout.status
+N=1000000
+
+status() {	# state, step
+	N=$((N + 1))
+	printf 'seq=%s\nstate=%s\nstep=%s\n' $N "$1" "$2" > $ST.tmp && mv $ST.tmp $ST
+}
+fail() {
+	N=$((N + 1))
+	printf 'seq=%s\nstate=error\nerror=%s\n' $N "$1" > $ST.tmp && mv $ST.tmp $ST
+	exit 1
+}
+. $ROOT/lib/sh/x45radio.sh
+
+# the Bluetooth input (x45bt) and this output cannot share the stick
+pidof x45bt >/dev/null 2>&1 && fail "the Bluetooth input is using the radio stick"
+[ -x $BIN/x45btsrc ] || fail "x45btsrc is not installed"
+
+status starting "looking for the radio stick"
+radio_up
+if [ -n "$RADIO_FRESH" ]; then
+	status starting "starting the controller"
+	sleep 4		# the controller needs a moment before the first HCI command
+fi
+
+status starting "starting bluetooth"
+mkdir -p $BT
+export X45BT_TLV_DIR=$BT/btout_
+export X45BTOUT_KNOWN=$BT/btout.known
+# the UI truncates its log at every start; keep the history for diagnosing
+# /tmp is RAM: the history is kept to a size that cannot fill it (the file is open for appending, cat > keeps it valid)
+HIST=/tmp/x45btout.history
+[ "$(wc -c < $HIST 2>/dev/null || echo 0)" -gt 262144 ] && { tail -c 65536 $HIST > $HIST.t; cat $HIST.t > $HIST; rm -f $HIST.t; }
+exec >> $HIST 2>&1
+echo "=== $(date) x45btsrc starting"
+exec 3<&0
+$BIN/x45btsrc <&3 &
+CHILD=$!
+( while kill -0 $CHILD 2>/dev/null; do sleep 300; [ "$(wc -c < $HIST)" -gt 262144 ] && { tail -c 131072 $HIST > $HIST.t; cat $HIST.t > $HIST; rm -f $HIST.t; }; done ) </dev/null >/dev/null 2>&1 &
+trap 'kill -INT $CHILD 2>/dev/null; ( sleep 5; kill -TERM $CHILD 2>/dev/null; sleep 3; kill -KILL $CHILD 2>/dev/null ) >/dev/null 2>&1 &' INT TERM
+while kill -0 $CHILD 2>/dev/null; do wait $CHILD; rc=$?; done
+echo "=== $(date) x45btsrc exited, status $rc"
+case $rc in
+0|130) exit 0 ;;
+esac
+fail "x45btsrc stopped unexpectedly (status $rc)"

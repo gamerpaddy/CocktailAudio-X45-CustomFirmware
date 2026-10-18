@@ -8,14 +8,17 @@
  *   x45art song    OUT ARTIST TITLE       the cover of the song a radio stream announces (iTunes catalogue, the
  *                                          song must match the artist and the title)
  *
- * The picture is written to OUT (a JPEG, PNG, GIF or BMP, checked to decode as one and not to be a speck). Exit 0:
+ * The picture is written to OUT as a BMP of at most 300 pixels on its longer side (what was found is checked to decode
+ * as a picture and not to be a speck). Exit 0:
  * written. Exit 1: nothing found (the answer is final: the caller remembers it). Exit 2: usage or a failure that may
  * go away (no network): the caller may ask again later.
  *
  * Nothing runs through a shell: every address and name reaches curl as an argument of its own. The unit's curl is
  * used for https (the certificate bundle of the replacement software, as x45rb does). Old pictures beside OUT are
  * pruned so that /tmp does not fill up. Names that are looked up (artist, title, station) leave the unit only
- * through these requests.
+ * through these requests. The address of a stream is sent to the directory only when it holds no login, no key in its
+ * query and no host of the unit's own network; a picture address of the directory is not fetched when it points at
+ * such a host, and a redirect of it may only go to https.
  */
 #include <ctype.h>
 #include <dirent.h>
@@ -28,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -56,7 +60,7 @@
 
 #define CA "/home/root/x45new/etc/ssl/cacert.pem"
 #define MAXIMG (4 << 20)        /* what the panel's loader accepts */
-#define KEEP 80                 /* pictures kept beside OUT */
+#define KEEP 24                 /* pictures kept beside OUT (a small BMP each: /tmp is memory) */
 
 static const char *const rb_servers[] = { "de1", "de2", "nl1", "at1" };
 
@@ -106,7 +110,117 @@ static int picture_ok(const char *path, int min_px)
 	return ok;
 }
 
+/* The picture at `path` made smaller than OUTMAX on its longer side (never enlarged), as a 24 bit BMP written over the
+ * same file. A cover can be 3000 pixels wide: the panel and the web page get a few hundred, so that showing one
+ * costs neither time nor memory there. 0 when done, -1 when the file is not a picture after all. */
+#define OUTMAX 300
+
+static int shrink_to_bmp(const char *path)
+{
+	size_t n;
+	char *b = slurp(path, &n, MAXIMG);
+	unsigned char *px, *row;
+	int sw, sh, comp, dw, dh, x, y, pad;
+	uint32_t fsz;
+	char tmp[600];
+	FILE *f;
+	unsigned char hdr[54];
+
+	if (!b)
+		return -1;
+	px = stbi_load_from_memory((const unsigned char *)b, (int)n, &sw, &sh, &comp, 4);
+	slurp_free(b);
+	if (!px)
+		return -1;
+	dw = sw;
+	dh = sh;
+	if (dw > OUTMAX || dh > OUTMAX) {
+		if (dw >= dh) {
+			dh = (int)((long)dh * OUTMAX / dw);
+			dw = OUTMAX;
+		} else {
+			dw = (int)((long)dw * OUTMAX / dh);
+			dh = OUTMAX;
+		}
+	}
+	if (dw < 1)
+		dw = 1;
+	if (dh < 1)
+		dh = 1;
+	pad = (4 - (dw * 3) % 4) % 4;
+	row = malloc((size_t)dw * 3 + 4);
+	if (!row) {
+		stbi_image_free(px);
+		return -1;
+	}
+	snprintf(tmp, sizeof tmp, "%s.%ld.bmp", path, (long)getpid());
+	f = fopen(tmp, "wb");
+	if (!f) {
+		free(row);
+		stbi_image_free(px);
+		return -1;
+	}
+	fsz = 54u + (uint32_t)(dw * 3 + pad) * (uint32_t)dh;
+	memset(hdr, 0, sizeof hdr);
+	hdr[0] = 'B';
+	hdr[1] = 'M';
+	hdr[2] = (unsigned char)fsz;
+	hdr[3] = (unsigned char)(fsz >> 8);
+	hdr[4] = (unsigned char)(fsz >> 16);
+	hdr[5] = (unsigned char)(fsz >> 24);
+	hdr[10] = 54;
+	hdr[14] = 40;
+	hdr[18] = (unsigned char)dw;
+	hdr[19] = (unsigned char)(dw >> 8);
+	hdr[22] = (unsigned char)dh;
+	hdr[23] = (unsigned char)(dh >> 8);
+	hdr[26] = 1;
+	hdr[28] = 24;
+	fwrite(hdr, 1, sizeof hdr, f);
+	for (y = dh - 1; y >= 0; y--) {   /* a BMP is written from the bottom row up */
+		int y0 = (int)((long)y * sh / dh), y1 = (int)((long)(y + 1) * sh / dh);
+
+		if (y1 <= y0)
+			y1 = y0 + 1;
+		for (x = 0; x < dw; x++) {
+			int x0 = (int)((long)x * sw / dw), x1 = (int)((long)(x + 1) * sw / dw);
+			unsigned long r = 0, g = 0, bl = 0, cnt = 0;
+			int xx, yy;
+
+			if (x1 <= x0)
+				x1 = x0 + 1;
+			for (yy = y0; yy < y1 && yy < sh; yy++)
+				for (xx = x0; xx < x1 && xx < sw; xx++) {
+					const unsigned char *q = px + ((size_t)yy * sw + xx) * 4;
+					int a = q[3];
+
+					/* see-through parts (a logo) are laid over a light ground */
+					r += (unsigned long)(q[0] * a + 240 * (255 - a)) / 255;
+					g += (unsigned long)(q[1] * a + 240 * (255 - a)) / 255;
+					bl += (unsigned long)(q[2] * a + 240 * (255 - a)) / 255;
+					cnt++;
+				}
+			if (!cnt)
+				cnt = 1;
+			row[x * 3] = (unsigned char)(bl / cnt);
+			row[x * 3 + 1] = (unsigned char)(g / cnt);
+			row[x * 3 + 2] = (unsigned char)(r / cnt);
+		}
+		memset(row + dw * 3, 0, (size_t)pad);
+		fwrite(row, 1, (size_t)(dw * 3 + pad), f);
+	}
+	free(row);
+	stbi_image_free(px);
+	if (fclose(f) != 0 || rename(tmp, path) < 0) {
+		unlink(tmp);
+		return -1;
+	}
+	return 0;
+}
+
 /* ------------------------------------------------------------------ fetch --- */
+
+static int g_https_redirects;   /* picture addresses come from a public directory: a redirect may only go to https */
 
 static int run_curl(const char *url, const char *out_file, char **mem, size_t *memlen, size_t memcap)
 {
@@ -141,8 +255,14 @@ static int run_curl(const char *url, const char *out_file, char **mem, size_t *m
 		} else if (nul >= 0) {
 			dup2(nul, 1);
 		}
+		if (out_file) {   /* --max-filesize does not stop a body of unknown length: the disk limit does */
+			struct rlimit rl = { MAXIMG + 65536, MAXIMG + 65536 };
+
+			setrlimit(RLIMIT_FSIZE, &rl);
+		}
 		argv[k++] = "curl";
 		argv[k++] = "-s";
+		argv[k++] = "-g";   /* no [1-999999999] or {a,b} expansion of an address into thousands of requests */
 		argv[k++] = "-f";
 		argv[k++] = "-L";
 		argv[k++] = "--max-redirs";
@@ -150,7 +270,7 @@ static int run_curl(const char *url, const char *out_file, char **mem, size_t *m
 		argv[k++] = "--proto";
 		argv[k++] = "=http,https";
 		argv[k++] = "--proto-redir";
-		argv[k++] = "=http,https";
+		argv[k++] = g_https_redirects ? "=https" : "=http,https";
 		argv[k++] = "--connect-timeout";
 		argv[k++] = "6";
 		argv[k++] = "-m";
@@ -222,15 +342,68 @@ static int fetch_mem(const char *url, char **mem, size_t *len, size_t cap)
 	return run_curl(url, NULL, mem, len, cap);
 }
 
+/* An address with a name and a password in it, or a host of the unit's own network (a loopback, private or link-local
+ * number, a name without a dot, .local, .lan): nothing the directory can know, and nothing to fetch for it. */
+static int url_private(const char *u)
+{
+	const char *h = strstr(u, "://"), *e;
+	char host[260];
+	size_t n;
+	unsigned a, b, c, d;
+
+	if (!h)
+		return 1;
+	h += 3;
+	e = h + strcspn(h, "/?#");
+	if (memchr(h, '@', (size_t)(e - h)) || *h == '[')
+		return 1;
+	n = (size_t)strcspn(h, "/?#:");
+	if (n == 0 || n >= sizeof host)
+		return 1;
+	memcpy(host, h, n);
+	host[n] = '\0';
+	if (!strchr(host, '.') || !strcasecmp(host, "localhost"))
+		return 1;
+	n = strlen(host);
+	if ((n > 6 && !strcasecmp(host + n - 6, ".local")) || (n > 4 && !strcasecmp(host + n - 4, ".lan")) ||
+	    (n > 4 && !strcasecmp(host + n - 4, ".home")) || (n > 9 && !strcasecmp(host + n - 9, ".fritz.box")))
+		return 1;
+	if (sscanf(host, "%u.%u.%u.%u", &a, &b, &c, &d) == 4)
+		return a == 0 || a == 10 || a == 127 || (a == 169 && b == 254) || (a == 172 && b >= 16 && b <= 31) ||
+		       (a == 192 && b == 168);
+	return 0;
+}
+
+/* a key or a login in the query of a stream address: it does not go to a directory */
+static int url_secret(const char *u)
+{
+	const char *q = strchr(u, '?');
+	static const char *const words[] = { "token", "key=", "pass", "auth", "sig", "secret", "session", "login", "user=" };
+	unsigned i;
+
+	if (!q)
+		return 0;
+	for (i = 0; i < sizeof words / sizeof *words; i++)
+		if (strcasestr(q, words[i]))
+			return 1;
+	return 0;
+}
+
 /* a picture from an address into OUT (through a temporary file), when it is one */
 static int fetch_picture(const char *url, const char *out, int min_px)
 {
 	char tmp[600];
+	int rc;
 
 	if (strncmp(url, "http://", 7) && strncmp(url, "https://", 8))
 		return 0;
+	if (strpbrk(url, "[]{}") || url_private(url))   /* a station entry must not point the unit at its own network */
+		return 0;
 	snprintf(tmp, sizeof tmp, "%s.%ld.part", out, (long)getpid());
-	if (run_curl(url, tmp, NULL, NULL, 0) < 0 || !picture_ok(tmp, min_px)) {
+	g_https_redirects = 1;
+	rc = run_curl(url, tmp, NULL, NULL, 0);
+	g_https_redirects = 0;
+	if (rc < 0 || !picture_ok(tmp, min_px)) {
 		unlink(tmp);
 		return 0;
 	}
@@ -545,7 +718,8 @@ static int station(const char *out, const char *stream, const char *name)
 	size_t len;
 	int found = 0, answered = 0;
 
-	if (stream[0] && urlenc(stream, enc, sizeof enc)) {
+	/* the address of a stream with a login, a key or a LAN host in it stays on the unit (the name search still runs) */
+	if (stream[0] && !url_private(stream) && !url_secret(stream) && urlenc(stream, enc, sizeof enc)) {
 		snprintf(pq, sizeof pq, "/json/stations/byurl?url=%s", enc);
 		if (rb_get(pq, &body, &len) == 0) {
 			answered = 1;
@@ -866,6 +1040,10 @@ int main(int argc, char **argv)
 		r = itunes(out, "song", argv[3], argv[4]);
 	} else {
 		return 2;
+	}
+	if (r > 0 && shrink_to_bmp(out) < 0) {
+		unlink(out);
+		r = 0;
 	}
 	return r > 0 ? 0 : r == 0 ? 1 : 2;
 }

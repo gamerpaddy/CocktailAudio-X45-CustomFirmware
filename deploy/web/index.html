@@ -42,6 +42,8 @@ ul.list li .acts{display:flex;gap:4px}
 .bar{height:10px;background:var(--btn);border-radius:6px;cursor:pointer;overflow:hidden;margin:8px 0}
 .bar>div{height:100%;background:var(--accent)}
 #slide{max-width:260px;max-height:260px;border-radius:8px;margin-top:8px}
+.np{display:flex;gap:14px;align-items:flex-start}.np .npt{flex:1;min-width:0}
+#art{flex:none;width:150px;height:150px;object-fit:contain;border-radius:8px}
 .kv{display:grid;grid-template-columns:150px 1fr;gap:4px 10px}
 .kv span:nth-child(odd){color:var(--dim)}
 .kv h4{grid-column:1/-1;margin:12px 0 2px;font-size:12px;letter-spacing:.1em;color:var(--dim);text-transform:uppercase;border-bottom:1px solid var(--line)}
@@ -92,7 +94,7 @@ const TABS = [["player","Player",0],["library","Library",1],["favs","Favourites"
 const MODS = {};
 function registerTab(m){ MODS[m.id] = m; TABS.splice(TABS.length - 1, 0, [m.id, m.label, m.screen == null ? -1 : m.screen]); tabsSig = ""; }
 /* the CD and radio-module tabs only exist while that input is chosen */
-const tabShown = id => id==="cd" ? !!(S && S.input_name==="cd") : id==="tuner" ? !!(S && (S.input_name==="fm" || S.input_name==="dab")) : true;
+const tabShown = id => id==="cd" ? !!(S && S.input_name==="cd") : id==="tuner" ? !!(S && (S.input_name==="fm" || S.input_name==="dab")) : MODS[id] && MODS[id].shown ? !!MODS[id].shown() : true;
 const TOKEN_KEY = "x45token";
 /* the API names an input with plain words; people read the same labels as on the panel */
 const IN_LABEL = {network:"Network", fm:"FM", "pc usb":"PC USB", "aes ebu":"AES/EBU", coaxial:"Coaxial", optical:"Optical",
@@ -197,8 +199,9 @@ function renderPlayer(){
   } else if(S.input>=3&&S.input<=8){
     h+='<div class="big">'+esc(lab(n))+'</div><div class="dim">'+(S.hw.spdif_rate&&S.input<=5?S.hw.spdif_rate+' Hz':'external input')+'</div>';
   } else {
-    h+='<div class="big">'+esc(m.title||m.name||(m.file||"").split("/").pop()||"Nothing playing")+'</div>'+
-       '<div class="acc">'+esc(m.artist)+'</div><div class="dim">'+esc(m.album)+'</div>';
+    h+='<div class="np">'+(S.art?'<img id="art" alt="" src="/api/art?'+S.art+'">':'')+'<div class="npt">'+
+       '<div class="big">'+esc(m.title||m.name||(m.file||"").split("/").pop()||"Nothing playing")+'</div>'+
+       '<div class="acc">'+esc(m.artist)+'</div><div class="dim">'+esc(m.album)+'</div></div></div>';
     const p=m.duration>0?Math.min(100,100*m.elapsed/m.duration):0;
     h+='<div class="bar" id="seekbar" data-d="'+m.duration+'"><div style="width:'+p+'%"></div></div>'+
        '<div class="dim">'+fmt(m.elapsed)+(m.duration>0?' / '+fmt(m.duration):' live')+' &middot; '+esc(m.state)+' &middot; '+(m.length>0?(m.song+1)+' / '+m.length:'-')+(m.audio?' &middot; '+esc(m.audio):'')+(m.bitrate?' &middot; '+m.bitrate+' kbit/s':'')+'</div>'+
@@ -211,9 +214,11 @@ function renderPlayer(){
 function renderLibrary(){
   /* rows of a disk (plain paths) can be queued, played and deleted; a radio station (@s|address) can be played;
      folders of the network or the radio directory (@...) are only opened */
+  if(FAV === null && !favTried){ favTried = true; favLoad(); }   /* to show which stations are kept already */
   const acts = e => {
     if(!e.path) return '';
-    if(e.path.startsWith("@s|")) return '<button class="sm" data-c="radio play '+esc(e.name.replace(/  \[.*$/,"").replace(/[|"]/g," "))+' | '+esc(e.path.slice(3))+'" title="play now">&#9654;</button>';
+    if(e.path.startsWith("@s|")) return (S.dir==="@fav"?'':'<button class="sm" data-fadd="'+esc(e.path.slice(3))+'" data-fn="'+esc(e.name.replace(/  \[.*$/,"").replace(/[|"]/g," ").trim())+'"'+(FAV && FAV.some(f=>f.url===e.path.slice(3))?' disabled title="in the favourites">&#9733;':' title="add to the favourites">&#9734;')+'</button>')+
+      '<button class="sm" data-c="radio play '+esc(e.name.replace(/  \[.*$/,"").replace(/[|"]/g," "))+' | '+esc(e.path.slice(3))+'" title="play now">&#9654;</button>';
     if(e.path[0]==="@") return '';
     return '<button class="sm" data-c="lib add '+esc(e.path)+'" title="add to the queue">+</button>'+
            '<button class="sm" data-c="lib play '+esc(e.path)+'" title="play now">&#9654;</button>'+
@@ -241,6 +246,7 @@ function renderCD(){
   const rows=cd.tracks.map(t=>'<span class="nm">'+esc(String(t.n).padStart(2,"0")+" "+(t.title||"Track"))+'</span><span class="dim">'+(t.len<0?"data":fmt(t.len))+'</span>');
   let h='<div class="row"><button data-c="key stop">&#9632; stop</button><button data-c="cd eject">&#9167; eject</button><button data-c="ir rec">&#9679; rip disc</button></div>'+ripFmt();
   if(S.input_name!=="cd") h+='<p class="dim">Choose the CD input and put a disc in; it loads by itself.</p>';
+  if(S.rec && S.rec.cd){ if(S.rec.active && S.rec.bad) h+='<p class="bad">'+S.rec.bad+' unreadable sectors so far (silence in the file, noted in the rip log)</p>'; else if(!S.rec.active && S.rec.msg) h+='<p class="bad">'+esc(S.rec.msg)+'</p>'; }
   h+='<div class="dim">'+esc(cd.album||cd.err||(S.input_name==="cd"?"no disc":""))+'</div>';
   h+=rows.length?list(rows,cd.active?cd.track-1:cd.sel):"";
   return h;
@@ -297,7 +303,7 @@ function kv(rows){ return rows.map(([k,v])=>k===null?'<h4>'+esc(v)+'</h4>':'<spa
 const yn = (v,a,b) => v?'<span class="ok">'+(a||"yes")+'</span>':'<span class="dim">'+(b||"no")+'</span>';
 
 /* ---------------------------------------------------------------- favourites */
-let FAV = null, FAVMSG = "";
+let FAV = null, FAVMSG = "", favTried = false;
 async function favLoad(){
   try{
     const r = await fetch("/api/favourites", {cache:"no-store"});
@@ -316,6 +322,13 @@ async function favSave(msg){
   }catch(e){ FAVMSG = "could not save"; }
   sigs.body = null; render();
 }
+/* a station from a list (the library tab) goes to the favourites; the saved list is read first so nothing is lost */
+async function favAdd(name, url){
+  if(FAV === null) await favLoad();
+  if(FAV === null) return;
+  if(!FAV.some(f => f.url === url)) FAV.push({name: name || guessName(url), url});
+  await favSave("added");
+}
 const validUrl = u => /^https?:\/\/[^\s]+$/.test(u);
 const guessName = u => { try{ return new URL(u).hostname.replace(/^(www|stream|streams|live|listen|icecast)\./,""); }catch(e){ return "Station"; } };
 
@@ -327,7 +340,7 @@ async function rbSearch(q){
   for(const h of hosts){
     try{
       const r = await fetch("https://"+h+".api.radio-browser.info/json/stations/search?name="+encodeURIComponent(q)+"&limit=40&hidebroken=true&order=clickcount&reverse=true");
-      if(r.ok){ RB = (await r.json()).filter(s=>/^https?:\/\//.test(s.url_resolved||s.url) && /^(mp3|ogg|flac|opus)?$/i.test(s.codec||"") && !s.hls); break; }
+      if(r.ok){ RB = (await r.json()).filter(s=>validUrl(s.url_resolved||s.url) && /^(mp3|ogg|flac|opus)?$/i.test(s.codec||"") && !s.hls).map(s=>{ s.name=String(s.name||"").replace(/[\x00-\x1f\x7f]+/g," ").trim(); return s; }); break; }
     }catch(e){}
   }
   if(RB===null) RB = [];
@@ -388,7 +401,7 @@ function renderStatus(){
   const m=S.mpd,t=S.tuner,rows=[];
   rows.push([null,"Playback"],["input",esc(lab(S.input_name))],["volume",S.volume_hidden?"fixed":S.volume+(S.muted?" (muted)":"")],["balance",balText(S.balance|0)],
     ["player",esc(m.state)+(m.audio?" &middot; "+esc(m.audio):"")+(m.bitrate?" &middot; "+m.bitrate+" kbit/s":"")],["AirPlay",yn(S.air,"streaming","idle")],
-    ["recording",S.rec.active?'<span class="bad">'+(S.rec.cd?"ripping "+S.rec.track+"/"+S.rec.tracks:"recording "+fmt(S.rec.secs))+'</span>':"no"]);
+    ["recording",S.rec.active?'<span class="bad">'+(S.rec.cd?"ripping "+S.rec.track+"/"+S.rec.tracks+(S.rec.bad?" ("+S.rec.bad+" unreadable)":""):"recording "+fmt(S.rec.secs))+'</span>':"no"]);
   if(m.error) rows.push(["player error",'<span class="bad">'+esc(m.error)+'</span>']);
   rows.push([null,"Hardware"],["headphone",yn(S.hw.headphone,"plugged in","not plugged in")],["PC USB cable",yn(S.hw.pcusb_cable,"connected","not connected")],
     ["PC USB routing",S.hw.pcusb_selected?"to the PC port":"to the unit"],["digital input rate",S.hw.spdif_rate?S.hw.spdif_rate+" Hz":"-"],
@@ -421,7 +434,15 @@ function render(){
   const b=$("body");
   let html="", fn=null;
   if(tab==="player") html=renderPlayer();
-  else if(tab==="library"){ html=renderLibrary(); fn=i=>cmd("screen 1\nsel "+i+"\nkey ok"); }
+  else if(tab==="library"){ html=renderLibrary(); fn=i=>{
+    const e=S.browse[i];
+    if(e && e.path==="@search"){   /* the panel opens its on-screen search here; the page has its own box on the Favourites tab */
+      tab="favs"; favLoad(); renderTabs(); sigs.body=null; render();
+      setTimeout(()=>{ const q=$("rbq"); if(q) q.focus(); },60);
+      return;
+    }
+    cmd("screen 1\nsel "+i+"\nkey ok");
+  }; }
   else if(tab==="favs"){ if($("body").querySelector("input:focus")) return; html=renderFavs(); }
   else if(tab==="cd"){ html=renderCD(); fn=i=>cmd("screen 3\nsel "+i+"\nkey ok"); }
   else if(tab==="tuner"){ html=renderTuner(); fn=i=>cmd("screen 4\nsel "+i+"\nkey ok"); }
@@ -436,6 +457,7 @@ function render(){
     wire(b,fn);
     if(MODS[tab] && MODS[tab].wire) MODS[tab].wire(b);
     b.querySelectorAll("[data-del]").forEach(x=>x.onclick=e=>{ e.stopPropagation(); delPath(x.dataset.del,x.dataset.n); });
+    b.querySelectorAll("[data-fadd]").forEach(x=>x.onclick=async e=>{ e.stopPropagation(); await favAdd(x.dataset.fn, x.dataset.fadd); x.textContent="\u2605"; x.title="in the favourites"; });
     const sb=$("seekbar"); if(sb) sb.onclick=e=>{const r=sb.getBoundingClientRect(),d=+sb.dataset.d; if(d>0) cmd("mpd seekcur "+Math.floor(d*(e.clientX-r.left)/r.width));};
     if(tab==="favs" && FAV) wireFavs(b);
     const go=$("fmgo"), fi=$("fmin");
@@ -455,8 +477,20 @@ async function sysPoll(){
   lastSys=Date.now();
   try{ const r=await fetch("/api/system",{cache:"no-store"}); if(r.ok){ SYS=await r.json(); sigs.body=null; render(); } }catch(e){}
 }
+/* one state request at a time, with a time limit (a command used to start two more, and answers could arrive out of order);
+ * nothing is asked while the page is hidden. After a failed request the live picture is asked for again (the unit or the
+ * network was away: the stream is gone for good). */
+let polling=0, pollFailed=0;
 async function poll(){
-  try{ const r=await fetch("/api/state",{cache:"no-store"}); if(r.ok){ S=await r.json(); render(); } }catch(e){}
+  if(document.hidden || (polling && Date.now()-polling<6000)) return;
+  polling=Date.now();
+  const c=new AbortController(), tm=setTimeout(()=>c.abort(),5000);
+  try{
+    const r=await fetch("/api/state",{cache:"no-store",signal:c.signal});
+    if(r.ok){ S=await r.json(); render(); if(pollFailed){ pollFailed=0; shownMode=""; shot(); } }
+    else pollFailed=1;
+  }catch(e){ pollFailed=1; }
+  clearTimeout(tm); polling=0;
 }
 
 (function(){
@@ -474,12 +508,21 @@ function shot(){
   shownMode = want;
   $("scr").src = (want === "stream" ? "/api/stream.mjpg?" : "/api/screen.bmp?") + Date.now();
 }
-$("live").onchange = shot; document.addEventListener("visibilitychange", shot);
+$("live").onchange = shot; document.addEventListener("visibilitychange", ()=>{ shot(); poll(); });
+/* the stream ends on its own (the unit caps it at 6 h, the web server is restarted): ask again */
+$("scr").onerror = ()=>{ if(shownMode==="stream") setTimeout(()=>{ shownMode=""; shot(); }, 3000); };
+setInterval(()=>{ if(shownMode==="stream"){ shownMode=""; shot(); } }, 5*3600*1000);
 poll(); setInterval(poll,1000); shot();
 </script>
 <!-- one line per tab module; each is a file in tabs/ -->
 <script src="tabs/wifi.js"></script>
 <script src="tabs/look.js"></script>
 <script src="tabs/files.js"></script>
+<script src="tabs/btout.js"></script>
+<script src="tabs/clock.js"></script>
+<script src="tabs/songs.js"></script>
+<script src="tabs/path.js"></script>
+<script src="tabs/disc.js"></script>
+<script src="tabs/health.js"></script>
 </body>
 </html>

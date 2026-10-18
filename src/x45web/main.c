@@ -9,12 +9,16 @@
  *   POST /api/cmd             body: command lines for x45ui (see x45ui web bridge)
  *   GET  /api/screen.bmp      what the panel shows right now
  *   GET  /api/slide           the current DAB slideshow picture
+ *   GET  /api/art             the picture of what plays (a cover or a station logo, a BMP), 404 when there is none
  *   GET  /api/meter           spectrum / level data (asks x45ui to run the analyzer)
  *   GET  /api/system          uptime, load, memory, temperatures, network, storage, services
  *   POST /api/library/delete  body: path relative to the library; folders and files
  *   GET|PUT|POST /api/files/..  the file manager of files.html (api_files.c; docs/X45-FILES.md); what it changes is
  *                             reported to MPD a few seconds later by libsync.c
  *   /api/wifi/..               the WiFi settings (api_wifi.c)
+ *   /api/cd/..                 the disc in the drive: own tags, rip log (api_cd.c)
+ *   /api/health, /api/logs/..  how the unit is doing, its logs (api_health.c)
+ *   /api/access                the access token (api_access.c)
  *
  * Everything under /api is also served as /api/v1 (same thing, for apps). CORS is open;
  * if etc/x45ui.conf has "web_token = X", every POST must carry "Authorization: Bearer X"
@@ -50,6 +54,7 @@
 #define CMD_FILE   "/tmp/x45ui.cmd"
 #define STATE_FILE "/tmp/x45ui.json"
 #define SLIDE_FILE "/tmp/x45-slide.img"
+#define ART_FILE "/tmp/x45art/cur"   /* kept by the panel (x45ui, ext/art.c) */
 #define METER_FILE "/tmp/x45meter.json"
 #define METER_WANT "/tmp/x45meter.want"
 #define CONF_FILE  "/home/root/x45new/etc/x45ui.conf"
@@ -83,6 +88,10 @@ static void send_all(int fd, const void *buf, size_t n)
 	}
 }
 
+/* 1 when `web_cross_site = on` is in x45ui.conf: pages of other sites may use the API (open CORS, no Origin/Host checks), as the
+ * early versions allowed. Off by default: a page opened in any browser on the network could otherwise drive the unit. Set per request. */
+int web_cors;
+
 void respond(int fd, int code, const char *type, const void *body, size_t len)
 {
 	char h[512];   /* the longest header set (a 507 with a JSON type) is about 330 bytes */
@@ -91,10 +100,11 @@ void respond(int fd, int code, const char *type, const void *body, size_t len)
 			  code == 500 ? "Internal Server Error" : code == 503 ? "Service Unavailable" : code == 507 ? "Insufficient Storage" : "Error";
 	int n = snprintf(h, sizeof h,
 			 "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-			 "Cache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\n"
-				 "Access-Control-Allow-Headers: Authorization, X-Token, Content-Type\r\n"
-				 "Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\nConnection: close\r\n\r\n",
-			 code, msg, type, len);
+			 "Cache-Control: no-store\r\n%sConnection: close\r\n\r\n",
+			 code, msg, type, len,
+			 web_cors ? "Access-Control-Allow-Origin: *\r\n"
+				    "Access-Control-Allow-Headers: Authorization, X-Token, Content-Type\r\n"
+				    "Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\n" : "");
 
 	if (n >= (int)sizeof h)
 		n = (int)sizeof h - 1;
@@ -205,12 +215,34 @@ static void send_stream(int fd, int full)
 {
 	static uint32_t cur[FB_W * FB_H], prev[FB_W * FB_H], small[(FB_W / 2) * (FB_H / 2)];
 	static uint8_t jpg[400 * 1024];
-	const char *head = "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=x45frame\r\n"
-			   "Cache-Control: no-store\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
+	char head[256];
 	struct timespec ts;
 	long last_send = 0, started;
-	int first = 1;
+	int first = 1, enc_fails = 0;
 
+	/* a few viewers at most: every stream reads the framebuffer and encodes JPEGs, which on this two-core unit comes
+	 * out of the audio and the panel. A slot is a lock file that the kernel frees when this process ends. */
+	{
+		int i, got = 0;
+
+		for (i = 0; i < 4 && !got; i++) {
+			char lock[48];
+			int lf;
+
+			snprintf(lock, sizeof lock, "/tmp/x45web.stream.%d", i);
+			lf = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+			if (lf >= 0 && flock(lf, LOCK_EX | LOCK_NB) == 0)
+				got = 1;   /* the descriptor stays open for as long as the stream runs */
+			else if (lf >= 0)
+				close(lf);
+		}
+		if (!got) {
+			respond_text(fd, 503, "too many viewers");
+			return;
+		}
+	}
+	snprintf(head, sizeof head, "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=x45frame\r\n"
+		 "Cache-Control: no-store\r\nConnection: close\r\n%s\r\n", web_cors ? "Access-Control-Allow-Origin: *\r\n" : "");
 	send_all(fd, head, strlen(head));
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	started = ts.tv_sec;
@@ -259,8 +291,13 @@ static void send_stream(int fd, int full)
 			sh = FB_H / 2;
 		}
 		n = jpeg_encode_bgra(src, sw, sh, sw, full ? 80 : 86, jpg, sizeof jpg);
-		if (n == 0)
-			return;
+		if (n == 0) {   /* a frame that does not fit the buffer is skipped; the stream goes on with the next one */
+			if (++enc_fails > 5)
+				return;
+			usleep(300000);
+			continue;
+		}
+		enc_fails = 0;
 		pl = snprintf(part, sizeof part, "--x45frame\r\nContent-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n", n);
 		if (write(fd, part, (size_t)pl) != pl || write(fd, jpg, n) != (ssize_t)n || write(fd, "\r\n", 2) != 2)
 			return;   /* the viewer went away (or stalled for 5 s) */
@@ -281,6 +318,10 @@ static void post_cmd(int fd, const char *body, size_t len)
 	size_t i, n = 0;
 	int f;
 
+	if (len > sizeof clean - 2) {   /* cutting it would queue half a command line */
+		respond_text(fd, 413, "command too long");
+		return;
+	}
 	for (i = 0; i < len && n < sizeof clean - 2; i++) {
 		unsigned char c = (unsigned char)body[i];
 
@@ -289,10 +330,19 @@ static void post_cmd(int fd, const char *body, size_t len)
 	}
 	if (n && clean[n - 1] != '\n')
 		clean[n++] = '\n';
-	f = open(CMD_FILE, O_WRONLY | O_CREAT | O_APPEND, 0666);
+	f = open(CMD_FILE, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
 	if (f < 0) {
 		respond_text(fd, 503, "cannot queue the command");
 		return;
+	}
+	{
+		struct stat st;
+
+		if (fstat(f, &st) == 0 && st.st_size > 64 * 1024) {   /* the panel takes the file every few hundred ms; this one is not being read */
+			close(f);
+			respond_text(fd, 503, "the command queue is full");
+			return;
+		}
 	}
 	if (write(f, clean, n) < 0) {
 		close(f);
@@ -315,6 +365,8 @@ static int conf_get(const char *key, char *out, size_t sz)
 	while (fgets(line, sizeof line, f)) {
 		char *v = line;
 
+		while (*v == ' ' || *v == '\t')   /* api_access.c and x45ui read an indented key too */
+			v++;
 		if (strncmp(v, key, kl))
 			continue;
 		v += kl;
@@ -657,8 +709,17 @@ static void library_delete(int fd, const char *body, size_t len)
 		char top[700];
 
 		snprintf(top, sizeof top, "%s/%.*s", MEDIA_DIR, (int)(e - rel), rel);
+		size_t bl;
+
 		if (!realpath(top, base) || !strcmp(base, real)) {
 			respond_text(fd, 403, "that is a library root, not deletable");
+			return;
+		}
+		/* a link on a foreign disk can point anywhere (at the unit's own files): only what lies below the library
+		 * folder of the disk is deleted */
+		bl = strlen(base);
+		if (strncmp(real, base, bl) || real[bl] != '/') {
+			respond_text(fd, 403, "that is outside the disk");
 			return;
 		}
 	}
@@ -677,6 +738,12 @@ static void library_delete(int fd, const char *body, size_t len)
 		respond_text(fd, 403, root[0] ? "that is a whole disk, not deletable" : "that is not a disk");
 		return;
 	}
+	if (strncmp(mount_dev, "/dev/sd", 7) != 0) {   /* the library holds attached disks, never the unit's own storage */
+		if (lock >= 0)
+			close(lock);
+		respond_text(fd, 403, "that is not an attached disk");
+		return;
+	}
 	/* an attached disk is mounted read-only by the media helper: switch it for the deletion, like the panel does,
 	 * and tell the helper not to put it back in the middle (it looks for the marker) */
 	if (!rw) {
@@ -688,7 +755,7 @@ static void library_delete(int fd, const char *body, size_t len)
 			respond_text(fd, 403, "that storage is read only");
 			return;
 		}
-		hold = open(HOLD_FILE, O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+		hold = hold_open();
 		snprintf(cmd, sizeof cmd, "mount -o remount,rw '%s' >/dev/null 2>&1", root);
 		if (system(cmd) != 0) {
 			if (hold >= 0) {
@@ -784,14 +851,16 @@ static void favourites_get(int fd)
 	free(out);
 }
 
+#define FAV_BUF (1 << 17)   /* room for the header and for the router's block (500 stations are about 50 KB) */
+
 /* POST: the whole list as "name<TAB>url" lines replaces the owner's stations; the header and the managed block stay */
 static void favourites_put(int fd, const char *body, size_t len)
 {
 	FILE *f = fopen(STATIONS_FILE, "r");
 	char line[1200], tmp[200];
-	char *head = malloc(1 << 15), *mgd = malloc(1 << 15);
+	char *head = malloc(FAV_BUF), *mgd = malloc(FAV_BUF);
 	size_t hn = 0, mn = 0;
-	int managed = 0, count = 0;
+	int managed = 0, count = 0, too_big = 0;
 	FILE *o;
 	const char *p = body, *end = body + len;
 
@@ -809,17 +878,27 @@ static void favourites_put(int fd, const char *body, size_t len)
 		if (strstr(line, "fritzbox begin"))
 			managed = 1;
 		if (managed) {
-			if (mn + l < (1 << 15))
+			if (mn + l < FAV_BUF)
 				memcpy(mgd + mn, line, l), mn += l;
+			else
+				too_big = 1;
 		} else if (line[0] == '#' || line[strspn(line, " \t\r\n")] == '\0') {
-			if (hn + l < (1 << 15))
+			if (hn + l < FAV_BUF)
 				memcpy(head + hn, line, l), hn += l;
+			else
+				too_big = 1;
 		}
 		if (strstr(line, "fritzbox end"))
 			managed = 0;
 	}
 	if (f)
 		fclose(f);
+	if (too_big) {   /* saving now would drop the end of the router's block (and its end marker): leave the file as it is */
+		free(head);
+		free(mgd);
+		respond_text(fd, 507, "the station file is too big to edit here");
+		return;
+	}
 	snprintf(tmp, sizeof tmp, "%s.web", STATIONS_FILE);
 	o = fopen(tmp, "w");
 	if (!o) {
@@ -833,8 +912,12 @@ static void favourites_put(int fd, const char *body, size_t len)
 		const char *nl = memchr(p, '\n', (size_t)(end - p));
 		size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
 		char name[200], url[500];
-		const char *tab = memchr(p, '\t', ll);
+		const char *tab;
 		size_t i;
+
+		if (ll && p[ll - 1] == '\r')   /* a list typed or pasted with Windows line ends */
+			ll--;
+		tab = memchr(p, '\t', ll);
 
 		/* an address that does not fit is dropped, not cut: a shortened one would be another station's */
 		if (tab && ll < 900 && ll - (size_t)(tab - p) - 1 <= 480) {
@@ -931,6 +1014,82 @@ static int files_authorized(const char *req, const char *hdr_end, const char *qu
 	return !strcmp(got, tok);
 }
 
+/* the value of the request header `name` ("\r\nhost:" - lower case, with the CR LF before and the colon), trimmed; 0 when
+ * the request has no such header */
+static int hdr_get(const char *req, const char *hdr_end, const char *name, char *out, size_t cap)
+{
+	const char *p = strcasestr(req, name);
+	size_t n = 0;
+
+	if (!p || p >= hdr_end)
+		return 0;
+	p += strlen(name);
+	while (*p == ' ' || *p == '\t')
+		p++;
+	while (p < hdr_end && *p != '\r' && *p != '\n' && n + 1 < cap)
+		out[n++] = *p++;
+	while (n && (out[n - 1] == ' ' || out[n - 1] == '\t'))
+		n--;
+	out[n] = '\0';
+	return 1;
+}
+
+static int conf_on(const char *key)
+{
+	char v[16];
+
+	return conf_get(key, v, sizeof v) && (!strcasecmp(v, "on") || !strcasecmp(v, "yes") || !strcmp(v, "1"));
+}
+
+/* DNS rebinding: a page of another site can make its own name point at this unit, and then read and drive the
+ * API as if it were the unit's own page. The Host of such a request is that name. Accepted are an address, a name
+ * without a dot (only the local network resolves one) and the usual private suffixes - nothing a stranger can
+ * register. */
+static int host_ok(const char *h)
+{
+	char name[256];
+	size_t n = 0, len;
+	int digits_dots = 1;
+	static const char *const suffix[] = { ".local", ".lan", ".fritz.box", ".home.arpa", ".internal", ".localdomain" };
+	unsigned i;
+
+	if (h[0] == '[')
+		return 1;   /* an IPv6 address */
+	for (; *h && *h != ':' && n + 1 < sizeof name; h++)
+		name[n++] = (char)tolower((unsigned char)*h);
+	name[n] = '\0';
+	if (!n)
+		return 0;
+	while (n > 1 && name[n - 1] == '.')
+		name[--n] = '\0';
+	for (len = 0; len < n; len++)
+		if (!isdigit((unsigned char)name[len]) && name[len] != '.')
+			digits_dots = 0;
+	if (digits_dots || !strchr(name, '.'))
+		return 1;
+	for (i = 0; i < sizeof suffix / sizeof *suffix; i++) {
+		size_t sl = strlen(suffix[i]);
+
+		if (n > sl && !strcmp(name + n - sl, suffix[i]))
+			return 1;
+	}
+	return 0;
+}
+
+/* Cross-site request forgery: a browser page of another site can send this unit a POST or a PUT (a form, or a fetch)
+ * and the browser adds an Origin header that names that site. A request from the unit's own pages names the unit
+ * itself; curl and apps send no Origin at all. */
+static int origin_ok(const char *req, const char *hdr_end, const char *host)
+{
+	char o[300];
+	const char *a;
+
+	if (!hdr_get(req, hdr_end, "\r\norigin:", o, sizeof o))
+		return 1;
+	a = strstr(o, "://");
+	return a && host[0] && !strcasecmp(a + 3, host);
+}
+
 #define REQ_MAX (64 * 1024)   /* headers and body of one request */
 
 static void serve(int fd)
@@ -946,6 +1105,8 @@ static void serve(int fd)
 
 	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+	web_cors = conf_on("web_cross_site");
+	alarm(20);   /* the whole request must arrive within this: a sender that trickles bytes would otherwise keep the process (of MAX_KIDS) for ever */
 	while (have < sizeof req - 1) {
 		ssize_t r = read(fd, req + have, sizeof req - 1 - have);
 
@@ -961,6 +1122,18 @@ static void serve(int fd)
 		respond_text(fd, 400, "bad request");
 		return;
 	}
+	{
+		/* a longer address is refused: cut at 2047 characters it would name another file (an upload would land
+		 * under a shorter name) */
+		const char *q = strchr(req, ' ');
+
+		while (q && *q == ' ')
+			q++;
+		if (!q || strcspn(q, " \r\n") > 2047) {
+			respond_text(fd, 414, "address too long");
+			return;
+		}
+	}
 	p = strcasestr(req, "\r\ncontent-length:");
 	if (p && p < hdr_end) {
 		clen_hdr = atoll(p + 17);
@@ -974,6 +1147,20 @@ static void serve(int fd)
 	}
 	if (!strncmp(path, "/api/v1/", 8) || !strcmp(path, "/api/v1"))
 		memmove(path + 4, path + 7, strlen(path + 7) + 1);   /* /api/v1/x -> /api/x */
+	if (!web_cors) {
+		char host[256];
+		int have_host = hdr_get(req, hdr_end, "\r\nhost:", host, sizeof host);
+
+		if (have_host && !host_ok(host)) {
+			respond_text(fd, 403, "this name is not allowed (use the unit's address, or set web_cross_site = on)");
+			return;
+		}
+		if (strcmp(method, "GET") && strcmp(method, "HEAD") && strcmp(method, "OPTIONS") &&
+		    !origin_ok(req, hdr_end, have_host ? host : "")) {
+			respond_text(fd, 403, "request from another site refused (set web_cross_site = on to allow it)");
+			return;
+		}
+	}
 	if (!strcmp(method, "OPTIONS")) {
 		respond(fd, 204, "text/plain", "", 0);
 		return;
@@ -989,6 +1176,7 @@ static void serve(int fd)
 		}
 		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &slow, sizeof slow);
 		setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &slow, sizeof slow);
+		alarm(0);   /* an upload or a download takes as long as it takes */
 		rq.body = hdr_end + 4;
 		rq.body_have = have - (size_t)(hdr_end + 4 - req);
 		rq.clen = clen_hdr;
@@ -1021,13 +1209,27 @@ static void serve(int fd)
 		respond_text(fd, 400, "incomplete request");
 		return;
 	}
+	alarm(0);   /* the request is whole; streams and long answers may take their time */
 	if (!strcmp(method, "POST") && !authorized(req, hdr_end)) {
+		respond_text(fd, 401, "token required");
+		return;
+	}
+	/* the logs say what the unit does and when: with a token set they need it, like the file manager */
+	if (!strncmp(path, "/api/logs", 9) && !files_authorized(req, hdr_end, query)) {
 		respond_text(fd, 401, "token required");
 		return;
 	}
 
 	/* the endpoint modules (api_*.c), each owning one prefix */
 	if (api_wifi(fd, method, path, hdr_end + 4, body_have < clen ? body_have : clen))
+		return;
+	if (api_songlog(fd, method, path, hdr_end + 4, body_have < clen ? body_have : clen))
+		return;
+	if (api_cd(fd, method, path, hdr_end + 4, body_have < clen ? body_have : clen))
+		return;
+	if (api_health(fd, method, path, hdr_end + 4, body_have < clen ? body_have : clen))
+		return;
+	if (api_access(fd, method, path, hdr_end + 4, body_have < clen ? body_have : clen))
 		return;
 	if (!strcmp(method, "POST") && !strcmp(path, "/api/cmd")) {
 		post_cmd(fd, hdr_end + 4, body_have < clen ? body_have : clen);
@@ -1066,6 +1268,16 @@ static void serve(int fd)
 			return;
 		}
 		respond(fd, 200, n > 3 && (unsigned char)b[0] == 0x89 ? "image/png" : "image/jpeg", b, n);
+		free(b);
+	} else if (!strcmp(path, "/api/art")) {
+		size_t n;
+		char *b = slurp(ART_FILE, &n, 1 << 20);
+
+		if (!b) {
+			respond_text(fd, 404, "no picture");
+			return;
+		}
+		respond(fd, 200, n > 1 && b[0] == 'B' && b[1] == 'M' ? "image/bmp" : n > 3 && (unsigned char)b[0] == 0x89 ? "image/png" : "image/jpeg", b, n);
 		free(b);
 	} else {
 		char file[2400];

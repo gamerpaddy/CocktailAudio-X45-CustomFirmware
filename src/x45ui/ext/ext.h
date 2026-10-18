@@ -16,11 +16,17 @@
  *   poll   the main loop, every pass, also while the screen is closed (cheap, please)
  *   badge   a symbol in the top bar, drawn whatever screen is up: `right` is the free edge, the return value
  *           the width it took (0: nothing to show)
+ *   json    write one JSON value (an object) for the web state; it appears there as "<name>": value
+ *   filter  every key, knob turn and remote key, before the UI sees it: return 1 to swallow it (the child lock); the
+ *           web bridge sends its events under the name "web" whose first word is `name`: `args` is the rest of the line (the web page's
+ *           POST /cmd, docs/X45-API.md); return 1 when it was understood
  */
 #ifndef X45UI_EXT_H
 #define X45UI_EXT_H
 
 #include "../ui.h"
+
+#include <stdio.h>
 
 struct ui_ext {
 	const char *name, *title, *menu;
@@ -35,6 +41,9 @@ struct ui_ext {
 	int (*hold)(struct ui *u, int code);
 	void (*poll)(struct ui *u);
 	int (*badge)(struct ui *u, int right);
+	void (*json)(struct ui *u, FILE *f);
+	int (*cmd)(struct ui *u, const char *args);
+	int (*filter)(struct ui *u, const struct x45_event *ev);
 };
 
 /* ---- called by main.c ---- */
@@ -51,14 +60,38 @@ int ui_ext_hold(struct ui *u, int code);                /* 1: the open screen ta
 int ui_ext_wants_hold(const struct ui *u);              /* the open screen has a `hold` */
 void ui_ext_poll(struct ui *u);
 int ui_ext_badges(struct ui *u, int right);              /* top bar: returns the new free edge */
+void ui_ext_state(struct ui *u, FILE *f);               /* web state: `,"name":{...}` for every screen with a json hook */
+int ui_ext_cmd(struct ui *u, const char *name, const char *args);   /* 1: a screen took the web command */
+int ui_ext_filter(struct ui *u, const struct x45_event *ev);   /* 1: a screen swallowed the input event */
 int ui_ext_menu_count(void);                            /* screens listed in Options */
 const struct ui_ext *ui_ext_menu_at(int i);
+
+/* the picture of what plays (ext/art.c), or NULL */
+const struct x45_image *ui_art_image(const struct ui *u);
+const struct x45_image *ui_art_small(const struct ui *u);   /* the same, in a box of about 160 px */
+
+/* the Bluetooth output (ext/btout.c) */
+void ui_btout_release(struct ui *u);            /* give the radio stick up (the Bluetooth input wants it) */
+const char *ui_btout_connected_name(void);      /* the headset the sound goes to (its name), NULL when none is connected */
+int ui_btout_routed(void);                      /* the sound goes to the device: the DAC (and the SSI capture behind it) hears nothing */
+void ui_btout_set_volume(int v);                /* the headset's level, 0..100 (reaches the headset through AVRCP) */
+int ui_btout_busy(void);                       /* the output's helper is running */
+void ui_btout_web(struct ui *u, const char *cmd);   /* on | off | scan | stopscan | connect ADDR | disconnect | forget ADDR */
+void ui_btout_json(struct ui *u, FILE *f);      /* the state, one JSON object */
+
+/* the song log (ext/songlog.c) */
+void ui_songlog_mark_now(struct ui *u);         /* put a star on the song that is on air (the remote's RED key) */
 
 /* ---- for the screens ---- */
 long ext_now_ms(void);
 /* ms from t to now. A long is 32 bits on this machine, so ext_now_ms() wraps (negative after 24.8 days of uptime):
  * compare a deadline through this, never by the size of the two values. */
 long ext_since(long now, long t);
+
+/* a setting of etc/x45ui.conf (the file main.c keeps with save_config_key): copies the value of `key` into out, 0 when
+ * the key is not there. The screens read their own keys with it; main.c's loader skips what it does not know. */
+int ext_conf_get(const char *key, char *out, size_t cap);
+int ext_conf_int(const char *key, int def);
 
 #define EXT_ROW_H 40
 

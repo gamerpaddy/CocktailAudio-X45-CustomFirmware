@@ -68,10 +68,13 @@ exclusively so that no button did anything meanwhile.
 | Tag edit | 0x65746 | 176 | KEY_EDIT | TAG EDIT: pop up the tag edit screen |
 | Sleep | 0x65748 | 142 | KEY_SLEEP | SLEEP: go to sleep mode |
 | Eject CD | 0x65761 | 161 | KEY_EJECTCD | EJECT: eject the CD |
-| Red | 0x6572a | 398 | KEY_RED | (reserved) |
+| Red | 0x6572a | 398 | KEY_RED | (reserved in the manual; here: marks the radio song that plays now in the song log) |
 | Green (also labelled brightness) | 0x6572c | 399 | KEY_GREEN | BRIGHTNESS: control the screen brightness |
-| Yellow | 0x6572e | 400 | KEY_YELLOW | (reserved) |
-| Blue | 0x6573d | 401 | KEY_BLUE | (reserved) |
+| Yellow | 0x6572e | 400 | KEY_YELLOW | (reserved in the manual; here: opens the song log) |
+| Blue | 0x6573d | 401 | KEY_BLUE | (reserved in the manual; here: opens the signal path screen, read only) |
+
+Child lock: while it is on, none of these keys act. Hold OK for three seconds to unlock (X45-RELIABILITY.md). Clock (359)
+opens the clock, and on the clock puts the backlight down; Sleep (142) opens the sleep timer and steps through its times.
 
 ## Letters on the number keys (multi-tap, as printed)
 

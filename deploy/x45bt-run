@@ -30,11 +30,15 @@ fi
 status starting "starting bluetooth"
 export X45BT_TLV_DIR=$BT/btstack_
 # the UI truncates its log at every start; keep the history for diagnosing
-exec >> /tmp/x45bt.history 2>&1
+# /tmp is RAM: the history is kept to a size that cannot fill it (the file is open for appending, cat > keeps it valid)
+HIST=/tmp/x45bt.history
+[ "$(wc -c < $HIST 2>/dev/null || echo 0)" -gt 262144 ] && { tail -c 65536 $HIST > $HIST.t; cat $HIST.t > $HIST; rm -f $HIST.t; }
+exec >> $HIST 2>&1
 echo "=== $(date) x45bt starting"
 exec 3<&0
 $BIN/x45bt <&3 &
 CHILD=$!
+( while kill -0 $CHILD 2>/dev/null; do sleep 300; [ "$(wc -c < $HIST)" -gt 262144 ] && { tail -c 131072 $HIST > $HIST.t; cat $HIST.t > $HIST; rm -f $HIST.t; }; done ) </dev/null >/dev/null 2>&1 &
 trap 'kill -INT $CHILD 2>/dev/null; ( sleep 5; kill -TERM $CHILD 2>/dev/null; sleep 3; kill -KILL $CHILD 2>/dev/null ) >/dev/null 2>&1 &' INT TERM
 while kill -0 $CHILD 2>/dev/null; do wait $CHILD; rc=$?; done
 echo "=== $(date) x45bt exited, status $rc"

@@ -28,6 +28,25 @@ running() {
 	[ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
 }
 
+# the watchdog service (x45wd): feeds the hardware watchdog, kills a UI that hangs, restarts a dead supervisor
+WDPID=/var/run/x45wd.pid
+STOPPED=/tmp/x45-stopped
+wd_running() {
+	[ -f "$WDPID" ] && kill -0 "$(cat "$WDPID" 2>/dev/null)" 2>/dev/null
+}
+wd_start() {
+	[ -x "$ROOT/bin/x45wd" ] || return 0
+	[ -f "$ROOT/etc/no-watchdog" ] && { wd_running || "$ROOT/bin/x45wd" --no-wd </dev/null >/dev/null 2>&1 & return 0; }   # one watcher, not one per start
+	wd_running || setsid "$ROOT/bin/x45wd" </dev/null >/dev/null 2>&1 &
+}
+# SIGTERM closes the watchdog the proper way (it is disarmed), so a stop never ends in a reset
+wd_stop() {
+	wd_running || return 0
+	kill "$(cat "$WDPID")" 2>/dev/null
+	n=0
+	while wd_running && [ $n -lt 10 ]; do sleep 1; n=$((n + 1)); done
+}
+
 case "$1" in
 start)
 	[ -f "$ROOT/ENABLED" ] || exit 0
@@ -44,10 +63,14 @@ start)
 		exit 0
 	fi
 	echo $((n + 1)) > "$COUNT"
+	rm -f "$STOPPED"
+	wd_start
 	setsid "$ROOT/bin/x45stack" </dev/null >/dev/null 2>&1 &
 	echo "x45new started"
 	;;
 stop)
+	touch "$STOPPED"
+	wd_stop
 	if running; then
 		kill "$(cat "$PIDFILE")" 2>/dev/null
 		echo "x45new stopped"

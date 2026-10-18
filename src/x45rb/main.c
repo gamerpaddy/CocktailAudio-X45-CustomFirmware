@@ -22,9 +22,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 
 #define CA "/home/root/x45new/etc/ssl/cacert.pem"
-#define LIMIT 300   /* asked for; the AAC and HLS streams this player cannot decode are left out of the list */
+#define PAGE 200    /* stations asked for per page (the panel's "load more" asks for the next page: x45rb CMD ARG OFFSET); the AAC and HLS streams this player cannot decode are left out of what is listed */
 
 static const char *const servers[] = { "de1", "de2", "nl1", "at1" };
 
@@ -36,13 +37,18 @@ static char *fetch(const char *path_query, size_t *len)
 	size_t cap = 1 << 16, n = 0;
 	char *buf = malloc(cap);
 	unsigned s;
+	struct timespec t0, t1;
 
 	if (!buf)
 		return NULL;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
 	for (s = 0; s < sizeof servers / sizeof *servers; s++) {
 		FILE *p;
 
-		snprintf(cmd, sizeof cmd, "curl -s -f -m 12 --max-filesize 4194304 --cacert " CA " -A x45/1.0 'https://%s.api.radio-browser.info%s' 2>/dev/null",
+		clock_gettime(CLOCK_MONOTONIC, &t1);
+		if (s && t1.tv_sec - t0.tv_sec >= 8)   /* the panel waits for this: with the internet down, 4 tries must not add up to a minute */
+			break;
+		snprintf(cmd, sizeof cmd, "curl -s -f --connect-timeout 4 -m 10 --max-filesize 4194304 --cacert " CA " -A x45/1.0 'https://%s.api.radio-browser.info%s' 2>/dev/null",
 			 servers[s], path_query);
 		p = popen(cmd, "r");
 		if (!p)
@@ -257,13 +263,14 @@ static void clean(char *s)
 static int emit(const char *json, int kind, const char *cmd)
 {
 	const char *p = skip_ws(json);
-	int n = 0;
+	int n = 0, raw = 0;
 	struct obj o;
 
 	if (*p != '[')
 		return 0;
 	p = skip_ws(p + 1);
-	while (*p == '{' && n < 256) {
+	while (*p == '{' && raw < 256) {
+		raw++;
 		p = read_obj(p, &o);
 		clean(o.name);
 		clean(o.url);   /* nothing a server sends may carry a tab or a line break into the lines this tool prints */
@@ -281,7 +288,7 @@ static int emit(const char *json, int kind, const char *cmd)
 
 			if (atoi(o.hls) != 0 || strstr(u, ".m3u8"))
 				playable = 0;
-			if (o.name[0] && !strncmp(u, "http", 4) && playable && n < 200) {
+			if (o.name[0] && !strncmp(u, "http", 4) && playable) {
 				char info[64] = "";
 
 				if (o.codec[0] && atoi(o.bitrate) > 0)
@@ -303,6 +310,10 @@ static int emit(const char *json, int kind, const char *cmd)
 		p = skip_ws(p);
 		if (*p == ',')
 			p = skip_ws(p + 1);
+	}
+	if (kind == 'S' && raw >= PAGE && strcmp(cmd, "search") != 0) {   /* a full page: there may be more behind it */
+		printf("D\t@more\tLoad %d more\n", PAGE);
+		n++;
 	}
 	return n;
 }
@@ -327,7 +338,11 @@ int main(int argc, char **argv)
 	size_t len = 0;
 	const char *cmd = argc > 1 ? argv[1] : "root";
 	const char *arg = argc > 2 ? argv[2] : "";
+	int off = argc > 3 ? atoi(argv[3]) : 0;
 	int kind = 'S';
+
+	if (off < 0 || off > 100000)
+		off = 0;
 
 	if (!strcmp(cmd, "root")) {
 		puts("D\t@fav\tFavourites");
@@ -342,17 +357,17 @@ int main(int argc, char **argv)
 	}
 	enc(arg, a, sizeof a);
 	if (!strcmp(cmd, "top")) {
-		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&order=votes&reverse=true&limit=%d", LIMIT);
+		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&order=votes&reverse=true&limit=%d&offset=%d", PAGE, off);
 	} else if (!strcmp(cmd, "trend")) {
-		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&order=clicktrend&reverse=true&limit=%d", LIMIT);
+		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&order=clicktrend&reverse=true&limit=%d&offset=%d", PAGE, off);
 	} else if (!strcmp(cmd, "country")) {
-		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&countrycode=%s&order=votes&reverse=true&limit=%d", a, LIMIT);
+		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&countrycode=%s&order=votes&reverse=true&limit=%d&offset=%d", a, PAGE, off);
 	} else if (!strcmp(cmd, "tag")) {
-		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&tag=%s&tagExact=true&order=votes&reverse=true&limit=%d", a, LIMIT);
+		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&tag=%s&tagExact=true&order=votes&reverse=true&limit=%d&offset=%d", a, PAGE, off);
 	} else if (!strcmp(cmd, "lang")) {
-		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&language=%s&languageExact=true&order=votes&reverse=true&limit=%d", a, LIMIT);
+		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&language=%s&languageExact=true&order=votes&reverse=true&limit=%d&offset=%d", a, PAGE, off);
 	} else if (!strcmp(cmd, "search")) {
-		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&name=%s&order=votes&reverse=true&limit=%d", a, LIMIT);
+		snprintf(q, sizeof q, "/json/stations/search?hidebroken=true&name=%s&order=votes&reverse=true&limit=%d&offset=%d", a, PAGE, off);
 	} else if (!strcmp(cmd, "countries")) {
 		snprintf(q, sizeof q, "/json/countries?order=stationcount&reverse=true&hidebroken=true&limit=80");
 		kind = 'C';
@@ -365,7 +380,7 @@ int main(int argc, char **argv)
 		kind = 'L';
 		cmd = "lang";
 	} else {
-		fprintf(stderr, "usage: x45rb root|top|trend|countries|country CC|tags|tag NAME|languages|lang NAME|search WORDS\n");
+		fprintf(stderr, "usage: x45rb root|top|trend|countries|country CC|tags|tag NAME|languages|lang NAME|search WORDS [OFFSET]\n");
 		return 2;
 	}
 	json = fetch(q, &len);

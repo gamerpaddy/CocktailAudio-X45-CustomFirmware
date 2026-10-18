@@ -29,6 +29,34 @@ HEALTHY_AFTER=90
 
 log() { echo "$(date '+%F %T') x45stack: $*" >> "$LOG"; }
 
+# ---- the reliability layer (see docs/X45-RELIABILITY.md) ----
+BOOTS=$ROOT/boots.log          # one line per start of the stack: why the last run ended
+CRASHLOG=$ROOT/crashes.log     # time TAB who TAB what: every UI crash and kill (x45wd writes here too)
+CLEAN=$ROOT/clean-stop         # left by an orderly end of the stack; missing at the next start: power loss, reset or a kill
+TRIP=$ROOT/wd.trip             # left by x45wd before it lets the hardware watchdog reset the unit
+X20MARK=/tmp/x45-x20-killed    # holds the boot id of the boot in which this stack took the panel from x20
+
+# the log of the last runs is kept: NAME -> NAME.1 -> NAME.2 (only when it has something in it)
+rotate() {
+	[ -s "$1" ] || return 0
+	[ -f "$1.1" ] && mv -f "$1.1" "$1.2"
+	mv -f "$1" "$1.1"
+}
+# keep the last N lines of a history file
+trim_log() {
+	[ -f "$1" ] && [ "$(wc -l < "$1")" -gt "$2" ] && { tail -n "$2" "$1" > "$1.tmp" && mv -f "$1.tmp" "$1"; }
+	return 0
+}
+crashlog() { printf '%s\t%s\t%s\n' "$(date '+%F %T')" "$1" "$2" >> "$CRASHLOG"; }
+# the system is going down (halt, poweroff, reboot): starting the vendor UI now would only fight the shutdown
+shutting_down() {
+	case "$(runlevel 2>/dev/null)" in
+	*" 0"|*" 6") return 0 ;;
+	esac
+	return 1
+}
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
+
 X20PID=
 X20KILLED=
 MDNSD_STOPPED=
@@ -46,6 +74,7 @@ x20_resume() {
 		pkill -x upmpdcli 2>/dev/null
 		/etc/rc5.d/S99x20 start >/dev/null 2>&1
 		X20KILLED=
+		rm -f "$X20MARK"
 		log "x20 restarted"
 	else
 		[ -n "$X20PID" ] && kill -CONT "$X20PID" 2>/dev/null && log "x20 (pid $X20PID) resumed"
@@ -83,15 +112,36 @@ cleanup() {
 	log "stopping"
 	[ -n "$UIPID" ] && kill "$UIPID" 2>/dev/null && wait "$UIPID" 2>/dev/null
 	mpd_stop
-	x20_resume
+	# a shutdown that wakes the vendor UI up in its last seconds (it initialises the audio board) was the one that
+	# once hung the unit: when the system is going down the panel is simply left alone
+	if shutting_down; then
+		log "the system is going down: the vendor UI is not started"
+	else
+		x20_resume
+	fi
+	touch "$CLEAN"
 	rm -f "$PIDFILE"
 	exit 0
 }
 trap cleanup TERM INT HUP
 
 echo $$ > "$PIDFILE"
-: > "$LOG"
+rotate "$LOG"
 log "started (pid $$)"
+# why did the last run end? (read before this run leaves its own mark)
+if [ -f "$TRIP" ]; then
+	prev="the hardware watchdog reset the unit ($(cat "$TRIP" 2>/dev/null))"
+	rm -f "$TRIP"
+elif [ -f "$CLEAN" ]; then
+	prev="orderly stop"
+else
+	prev="no orderly stop: power loss, reset or the stack was killed"
+fi
+rm -f "$CLEAN"
+printf '%s\tstart\tuptime %ss; previous run: %s\n' "$(date '+%F %T')" "$(cut -d. -f1 /proc/uptime)" "$prev" >> "$BOOTS"
+trim_log "$BOOTS" 300
+trim_log "$CRASHLOG" 300
+log "previous run: $prev"
 # the kernel's input debug printer (evbug) is loaded on this unit: it writes a console line for every key
 # and every knob edge, which at 115200 baud keeps the CPU busy while the knob turns
 rmmod evbug 2>/dev/null
@@ -99,8 +149,8 @@ rmmod evbug 2>/dev/null
 # and keeps running across restarts of the stack. Does nothing without wifi/state/enabled.
 [ -x "$BIN/x45wifi-run" ] && "$BIN/x45wifi-run" boot >> "$LOG" 2>&1 &
 # logs that only ever grow: start a new one when it is large
-for f in "$ROOT/x45web.log" "$ROOT/upmpdcli.out" "$ROOT/shairport.log" "$ROOT/librespot.log" "$ROOT/mpd/log"; do
-	[ -f "$f" ] && [ "$(wc -c < "$f")" -gt 1048576 ] && : > "$f"
+for f in "$ROOT/x45web.log" "$ROOT/upmpdcli.out" "$ROOT/shairport.log" "$ROOT/librespot.log" "$ROOT/mpd/log" "$ROOT/mpd/stdout"; do
+	[ -f "$f" ] && [ "$(wc -c < "$f")" -gt 1048576 ] && rotate "$f"
 done
 mkdir -p "$ROOT/mpd/playlists"
 
@@ -109,10 +159,17 @@ mkdir -p "$ROOT/mpd/playlists"
 # do not race its start-up, then give it time to finish painting before we take
 # the panel.
 n=0
+if [ -f "$X20MARK" ] && [ "$(cat "$X20MARK" 2>/dev/null)" = "$(boot_id)" ]; then
+	# the supervisor before this one (killed, or restarted by x45wd) had already taken the panel from x20
+	X20KILLED=1
+	[ -z "$(pidof mdnsd)" ] && MDNSD_STOPPED=1
+	log "x20 was taken over by an earlier run of the stack in this boot"
+else
 while [ $n -lt 120 ]; do
 	X20PID=$(pidof x20) && break
 	sleep 1; n=$((n + 1))
 done
+fi
 if [ -n "$X20PID" ]; then
 	log "x20 is up (pid $X20PID) after ${n}s"
 else
@@ -290,14 +347,15 @@ start_spotify() {
 
 # ------------------------------------------------------------------- the panel --
 # let x20 finish its own start-up drawing before we freeze it
-sleep 10
+[ -n "$X20KILLED" ] || sleep 10
 X20PID=$(pidof x20)
 # x20 is KILLED, not paused: a paused process still owns its sockets, and the
 # UPnP renderer needs the SSDP port (UDP 1900) that x20's own DLNA code holds.
 # x20_run exits on SIGKILL (status 137) so nothing respawns it. x20_resume starts
 # it again by the vendor's own init script if we ever hand back.
-if [ -n "$X20PID" ] && kill -KILL "$X20PID" 2>/dev/null; then
+if [ -z "$X20KILLED" ] && [ -n "$X20PID" ] && kill -KILL "$X20PID" 2>/dev/null; then
 	X20KILLED=1
+	boot_id > "$X20MARK"
 	log "x20 (pid $X20PID) killed"
 	# x20 registered its own AirPlay receiver ("X45", port 9800) with the system
 	# mDNS daemon, which keeps announcing it after x20 is paused: every phone
@@ -357,7 +415,7 @@ start_web
 # restart to switch it on; the log is emptied at every start.
 UI_TRACE=
 [ -f "$ROOT/etc/ui-trace" ] && UI_TRACE=--trace
-: > "$ROOT/x45ui.log"
+rotate "$ROOT/x45ui.log"
 
 crashes=0
 window_start=$(date +%s)
@@ -372,6 +430,10 @@ while true; do
 	rc=$?
 	UIPID=
 	log "x45ui exited with status $rc"
+	case $rc in
+	0|3|4) ;;
+	*) if [ $rc -gt 128 ]; then crashlog x45stack "x45ui ended by signal $((rc - 128))"; else crashlog x45stack "x45ui exited with status $rc"; fi ;;
+	esac
 
 	case $rc in
 	4)
@@ -380,9 +442,10 @@ while true; do
 		continue
 		;;
 	0)
-		# SIGTERM/INT or a deliberate quit: give the vendor UI back
+		# SIGTERM/INT or a deliberate quit: give the vendor UI back (not while the system goes down, see cleanup)
 		mpd_stop
-		x20_resume
+		if shutting_down; then log "the system is going down: the vendor UI is not started"; else x20_resume; fi
+		touch "$CLEAN"
 		rm -f "$PIDFILE"
 		exit 0
 		;;
@@ -391,6 +454,7 @@ while true; do
 		"$BIN/x45mpc" stop >/dev/null 2>&1
 		sleep 1
 		mpd_stop
+		touch "$CLEAN"
 		poweroff
 		exit 0
 		;;
@@ -404,6 +468,7 @@ while true; do
 	crashes=$((crashes + 1))
 	if [ $crashes -gt $MAX_CRASHES ]; then
 		log "x45ui crashed $crashes times in ${CRASH_WINDOW}s: giving up, handing the panel back to x20"
+		crashlog x45stack "x45ui crashed $crashes times in ${CRASH_WINDOW}s: the vendor UI was restored"
 		mpd_stop
 		x20_resume
 		rm -f "$PIDFILE"

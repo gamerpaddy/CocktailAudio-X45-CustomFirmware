@@ -17,9 +17,17 @@
  * Target: the first read-write mount under /mnt, in "My Music/Recordings" when the
  * disk has a "My Music" folder, else "Recordings" at its top.
  *
+ * A CD rip never overwrites: every disc gets a folder of its own (a second disc with the same name becomes "name (2)";
+ * a disc without any tags is "Unknown Artist - Audio CD <id>", the id being the number x45cd discid prints), a track
+ * is written as <name>.part and renamed when whole, a track already ripped whole in that format is kept, and a file
+ * that is in the way gets a "(2)". The folder holds "rip log.txt": per track the CRC-32 of the PCM (the same for
+ * FLAC and MP3 of one disc, so two rips can be compared), the unreadable sectors (a sector the drive cannot give
+ * after three tries is silence, and says so there and in the status), and the peak level. Tags come from the CD-Text
+ * and from the user's own entries for the disc (x45cd text, x45cd setmeta).
+ *
  * Status (rewritten twice a second): /tmp/x45rec.status
  *   state=rec|ripping|done|error  secs=<elapsed>  bytes=<written>  file=<path>
- *   track=<n>  tracks=<total>  msg=<text>
+ *   track=<n>  tracks=<total>  bad=<unreadable sectors>  dir=<album folder>  msg=<text>
  */
 #define _GNU_SOURCE
 #include <alsa/asoundlib.h>
@@ -33,6 +41,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,8 +72,9 @@ static long now_ms(void)
 struct stat_info {
 	const char *state;
 	long secs, bytes;
-	char file[300], msg[120];
+	char file[300], msg[120], dir[300];
 	int track, tracks;
+	int bad;        /* unreadable CD sectors so far (they are written as silence and logged) */
 };
 
 static void write_status(const struct stat_info *s)
@@ -73,8 +83,8 @@ static void write_status(const struct stat_info *s)
 
 	if (!f)
 		return;
-	fprintf(f, "state=%s\nsecs=%ld\nbytes=%ld\nfile=%s\ntrack=%d\ntracks=%d\nmsg=%s\n",
-		s->state, s->secs, s->bytes, s->file, s->track, s->tracks, s->msg);
+	fprintf(f, "state=%s\nsecs=%ld\nbytes=%ld\nfile=%s\ntrack=%d\ntracks=%d\nbad=%d\ndir=%s\nmsg=%s\n",
+		s->state, s->secs, s->bytes, s->file, s->track, s->tracks, s->bad, s->dir, s->msg);
 	fclose(f);
 	rename(STATUS ".tmp", STATUS);
 }
@@ -221,7 +231,9 @@ static long file_size(const char *path)
 {
 	struct stat st;
 
-	return stat(path, &st) == 0 ? (long)st.st_size : 0;
+	if (stat(path, &st) != 0)
+		return 0;
+	return st.st_size > 0x7fffffffL ? 0x7fffffffL : (long)st.st_size;   /* a long is 32 bits here: stay positive */
 }
 
 /* ------------------------------------------------------------------- input --- */
@@ -289,6 +301,7 @@ static int cmd_in(int rate, int bits, const char *name, const char *dir_arg)
 	 * accordingly; what was heard meanwhile is written first. */
 	if (rate == 192000) {
 		long tstart = now_ms(), tfirst = 0, tlast = 0;
+		int have_first = 0;
 		long long first_n = 0, got = 0;
 		size_t cap = (size_t)192000 * 2 * 2;   /* 2 s at the highest rate */
 		double real;
@@ -315,7 +328,8 @@ static int cmd_in(int rate, int bits, const char *name, const char *dir_arg)
 				continue;
 			}
 			tnow = now_ms();
-			if (!tfirst) {
+			if (!have_first) {   /* a flag: 0 is a valid time near the 32-bit wrap */
+				have_first = 1;
 				tfirst = tnow;
 				first_n = n;
 			}
@@ -325,7 +339,7 @@ static int cmd_in(int rate, int bits, const char *name, const char *dir_arg)
 							      : (int32_t)((uint32_t)((int32_t *)raw)[i] << 8) >> 8;
 			got += n;
 		}
-		real = tlast > tfirst ? (double)(got - first_n) * 1000.0 / (double)(tlast - tfirst) : 0;
+		real = tlast - tfirst > 0 ? (double)(got - first_n) * 1000.0 / (double)(tlast - tfirst) : 0;   /* a difference, not two absolute times */
 		for (i = 0; i < (int)(sizeof std_rates / sizeof *std_rates); i++) {
 			double d = real > 0 ? fabs(real / std_rates[i] - 1.0) : 1e9;
 
@@ -403,7 +417,8 @@ static int cmd_in(int rate, int bits, const char *name, const char *dir_arg)
 			write_status(&st);
 		}
 	}
-	FLAC__stream_encoder_finish(enc);
+	if (!FLAC__stream_encoder_finish(enc) && strcmp(st.state, "error"))
+		fail(&st, "encoder failed (disk full?)");
 	FLAC__stream_encoder_delete(enc);
 	snd_pcm_drop(pcm);
 	snd_pcm_close(pcm);
@@ -486,9 +501,10 @@ static int read_toc(int fd, struct toc *t)
 	return 0;
 }
 
+/* what `x45cd text` says about the disc: its CD-Text, with the user's own tags (web page) laid over it */
 struct cdtext {
-	char album[120], artist[120];
-	char title[MAXTRK + 1][120], perf[MAXTRK + 1][120];
+	char album[120], artist[120], genre[120], upc[40];
+	char title[MAXTRK + 1][120], perf[MAXTRK + 1][120], composer[MAXTRK + 1][120];
 };
 
 static void load_cdtext(struct cdtext *c)
@@ -503,7 +519,7 @@ static void load_cdtext(struct cdtext *c)
 		char kind = line[0], *txt;
 		int n;
 
-		if ((kind != 'T' && kind != 'P') || sscanf(line + 1, "%d", &n) != 1 || n < 0 || n > MAXTRK)
+		if (!strchr("TPCGU", kind) || sscanf(line + 1, "%d", &n) != 1 || n < 0 || n > MAXTRK)
 			continue;
 		txt = strchr(line + 2, ' ');
 		if (!txt)
@@ -514,12 +530,239 @@ static void load_cdtext(struct cdtext *c)
 			snprintf(c->album, sizeof c->album, "%s", txt);
 		else if (kind == 'P' && n == 0)
 			snprintf(c->artist, sizeof c->artist, "%s", txt);
+		else if (kind == 'G' && n == 0)
+			snprintf(c->genre, sizeof c->genre, "%s", txt);
+		else if (kind == 'U' && n == 0)
+			snprintf(c->upc, sizeof c->upc, "%s", txt);
 		else if (kind == 'T')
 			snprintf(c->title[n], sizeof c->title[0], "%s", txt);
-		else
+		else if (kind == 'C')
+			snprintf(c->composer[n], sizeof c->composer[0], "%s", txt);
+		else if (kind == 'P')
 			snprintf(c->perf[n], sizeof c->perf[0], "%s", txt);
 	}
 	pclose(p);
+}
+
+/* ------------------------------------------------------- rip folder, log, reading --- */
+
+#define RIPLOG "rip log.txt"
+
+/* the CRC-32 of the PCM of a track: the same for the same audio whatever file format it went into, so two rips of one
+ * disc (or one track) can be compared from the log */
+static uint32_t crc_tab[256];
+
+static void crc_init(void)
+{
+	uint32_t i, k, c;
+
+	for (i = 0; i < 256; i++) {
+		for (c = i, k = 0; k < 8; k++)
+			c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1;
+		crc_tab[i] = c;
+	}
+}
+
+static uint32_t crc_update(uint32_t crc, const uint8_t *p, size_t n)
+{
+	while (n--)
+		crc = crc_tab[(crc ^ *p++) & 0xff] ^ (crc >> 8);
+	return crc;
+}
+
+/* The rip log lives on a removable disk that may hold anything: a link in its place is not followed (this runs as root) */
+static FILE *log_open(const char *path, int append)
+{
+	int fd = open(path, (append ? O_WRONLY | O_APPEND | O_CREAT : O_RDONLY) | O_NOFOLLOW | O_CLOEXEC, 0644);
+	FILE *f;
+
+	if (fd < 0)
+		return NULL;
+	f = fdopen(fd, append ? "a" : "r");
+	if (!f)
+		close(fd);
+	return f;
+}
+
+/* The disc a folder holds, from the rip log in it; 0 when it has none. A folder of another disc is never reused. */
+static uint32_t dir_disc(const char *dir)
+{
+	char path[500], line[300];
+	FILE *f;
+	uint32_t id = 0;
+	unsigned v;
+
+	snprintf(path, sizeof path, "%s/" RIPLOG, dir);
+	f = log_open(path, 0);
+	if (!f)
+		return 0;
+	while (fgets(line, sizeof line, f))
+		if (sscanf(line, "disc %x", &v) == 1)
+			id = v;
+	fclose(f);
+	return id;
+}
+
+/* The folder of a disc: base/name when that is free or already this disc's, else base/name (2), (3) ... Nothing that
+ * is there is touched. */
+static void pick_dir(char *out, size_t cap, const char *base, const char *name, uint32_t sig)
+{
+	struct stat st;
+	int n;
+
+	for (n = 1; n < 100; n++) {
+		if (n == 1)
+			snprintf(out, cap, "%s/%s", base, name);
+		else
+			snprintf(out, cap, "%s/%s (%d)", base, name, n);
+		if (lstat(out, &st) != 0)
+			break;
+		if (S_ISDIR(st.st_mode) && dir_disc(out) == sig)   /* lstat: a link is never taken for the folder */
+			break;
+	}
+	mkdir_p(out);
+}
+
+static int file_exists(const char *path)
+{
+	struct stat st;
+
+	return stat(path, &st) == 0;
+}
+
+/* dir/name.ext, or dir/name (2).ext when that file is there */
+static void unique_file(char *out, size_t cap, const char *dir, const char *name, const char *ext)
+{
+	int n;
+
+	snprintf(out, cap, "%s/%s.%s", dir, name, ext);
+	for (n = 2; n < 100 && file_exists(out); n++)
+		snprintf(out, cap, "%s/%s (%d).%s", dir, name, n, ext);
+}
+
+/* One line per ripped track, tab separated, appended to the folder's log:
+ *   track <n> <ok|damaged> <ext> <crc32> <unreadable sectors> <peak %> <frames> <file> <note> */
+static void log_line(const char *dir, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+
+static void log_line(const char *dir, const char *fmt, ...)
+{
+	char path[500];
+	va_list ap;
+	FILE *f;
+
+	snprintf(path, sizeof path, "%s/" RIPLOG, dir);
+	f = log_open(path, 1);
+	if (!f)
+		return;
+	va_start(ap, fmt);
+	vfprintf(f, fmt, ap);
+	va_end(ap);
+	fclose(f);
+}
+
+/* the earlier line of this track in the log: 1 when found (crc, status "ok" or "damaged", file name) */
+static int log_find(const char *dir, int trk, const char *ext, uint32_t *crc, int *ok, char *file, size_t cap)
+{
+	char path[500], line[700];
+	FILE *f;
+	int found = 0;
+
+	snprintf(path, sizeof path, "%s/" RIPLOG, dir);
+	f = log_open(path, 0);
+	if (!f)
+		return 0;
+	while (fgets(line, sizeof line, f)) {
+		char *p[10], *s = line;
+		int k;
+
+		line[strcspn(line, "\r\n")] = '\0';
+		for (k = 0; k < 10; k++) {
+			p[k] = s;
+			if (k < 9) {
+				s = strchr(s, '\t');
+				if (!s)
+					break;
+				*s++ = '\0';
+			}
+		}
+		if (k < 8 || strcmp(p[0], "track") || atoi(p[1]) != trk)
+			continue;
+		if (ext && strcmp(p[3], ext))
+			continue;
+		*crc = (uint32_t)strtoul(p[4], NULL, 16);
+		*ok = !strcmp(p[2], "ok");
+		snprintf(file, cap, "%s", p[8]);
+		found = 1;
+	}
+	fclose(f);
+	return found;
+}
+
+/* Test hook: X45REC_FAULT=<first>-<last> makes the sectors in that range unreadable (a scratched disc to try the
+ * error handling on). Not set, the drive is asked as it is. */
+static int fault_lo = -1, fault_hi = -1;
+
+static int cd_read(int fd, struct cd_readaudio *ra)
+{
+	if (fault_lo >= 0 && ra->addr <= fault_hi && ra->addr + ra->nframes - 1 >= fault_lo) {
+		errno = EIO;
+		return -1;
+	}
+	return ioctl(fd, CDROMREADAUDIO, ra);
+}
+
+/* How the drive got on with the sectors of one track. */
+struct rdstat {
+	int bad;                 /* sectors that could not be read (silence went into the file) */
+	int retries;             /* reads that failed and were tried again */
+	int streak;              /* unreadable sectors in a row: a damaged area is passed quickly */
+	int32_t at[8];           /* the first unreadable sectors */
+};
+
+/* Reads n sectors at lba. A chunk that fails is read again sector by sector, so that one scratch costs one sector and
+ * not 13; a sector that fails three times is silence. Returns the number of unreadable sectors. */
+static int read_frames(int fd, int32_t lba, int n, uint8_t *raw, struct rdstat *rs)
+{
+	struct cd_readaudio ra;
+	int tries, bad = 0, f;
+
+	if (rs->streak < 26) {
+		for (tries = 0; tries < 3; tries++) {
+			ra.addr = lba;
+			ra.addr_format = CDROM_LBA;
+			ra.nframes = n;
+			ra.buf = raw;
+			if (cd_read(fd, &ra) == 0) {
+				rs->streak = 0;
+				return 0;
+			}
+			rs->retries++;
+		}
+	}
+	for (f = 0; f < n; f++) {
+		int max_tries = rs->streak >= 26 ? 1 : 3;
+
+		for (tries = 0; tries < max_tries; tries++) {
+			ra.addr = lba + f;
+			ra.addr_format = CDROM_LBA;
+			ra.nframes = 1;
+			ra.buf = raw + (size_t)f * CD_FRAMESIZE_RAW;
+			if (cd_read(fd, &ra) == 0)
+				break;
+			rs->retries++;
+		}
+		if (tries == max_tries) {
+			memset(raw + (size_t)f * CD_FRAMESIZE_RAW, 0, CD_FRAMESIZE_RAW);
+			if (rs->bad + bad < 8)
+				rs->at[rs->bad + bad] = lba + f;
+			bad++;
+			rs->streak++;
+		} else {
+			rs->streak = 0;
+		}
+	}
+	rs->bad += bad;
+	return bad;
 }
 
 /* ------------------------------------------------------------------- video DVD --- */
@@ -592,8 +835,9 @@ static int cmd_dvd(int only, const char *base, uint32_t sig, struct stat_info *s
 	bits = d.t.fmt == 4 && d.t.bits >= 16 && d.t.bits <= 24 ? d.t.bits : 16;
 	dvd_label(label, sizeof label);
 	sanitize(label);
-	snprintf(album_dir, sizeof album_dir, "%s/%s", base, label);
-	mkdir_p(album_dir);
+	pick_dir(album_dir, sizeof album_dir, base, label, sig);
+	snprintf(st->dir, sizeof st->dir, "%s", album_dir);
+	log_line(album_dir, "disc %08x\nvideo DVD, sound only, one FLAC per chapter\n", (unsigned)sig);
 	signal(SIGTERM, on_term);
 	signal(SIGINT, on_term);
 	st->state = "ripping";
@@ -604,7 +848,7 @@ static int cmd_dvd(int only, const char *base, uint32_t sig, struct stat_info *s
 
 	for (ch = 1; ch <= nch && !g_stop && !rc; ch++) {
 		const struct dvd_chapter *c = &d.t.ch[ch - 1];
-		char name[200], path[600], num[16], tot[16], title[40];
+		char name[200], path[600], part[610], num[16], tot[16], title[40];
 		const char *tags[6][2];
 		FLAC__StreamEncoder *enc;
 		long long frames = 0;
@@ -619,6 +863,12 @@ static int cmd_dvd(int only, const char *base, uint32_t sig, struct stat_info *s
 		snprintf(name, sizeof name, "%02d %s", ch, title);
 		snprintf(path, sizeof path, "%s/%s.flac", album_dir, name);
 		snprintf(st->file, sizeof st->file, "%s", path);
+		if (file_exists(path)) {
+			fprintf(stderr, "x45rec: %s is there already, kept\n", name);
+			continue;       /* never overwrite what an earlier rip of this disc left */
+		}
+		snprintf(part, sizeof part, "%s.part", path);
+		unlink(part);   /* a link or an old half file on the disk is replaced, never written through */
 		snprintf(num, sizeof num, "%d", ch);
 		snprintf(tot, sizeof tot, "%d", nch);
 		tags[0][0] = "TITLE";       tags[0][1] = title;
@@ -627,7 +877,7 @@ static int cmd_dvd(int only, const char *base, uint32_t sig, struct stat_info *s
 		tags[3][0] = "ALBUMARTIST"; tags[3][1] = "";
 		tags[4][0] = "TRACKNUMBER"; tags[4][1] = num;
 		tags[5][0] = "TRACKTOTAL";  tags[5][1] = tot;
-		enc = enc_open(path, 2, bits, (unsigned)rate, tags, 6);
+		enc = enc_open(part, 2, bits, (unsigned)rate, tags, 6);
 		if (!enc) {
 			fail(st, "cannot write the file");
 			rc = 5;
@@ -670,15 +920,20 @@ static int cmd_dvd(int only, const char *base, uint32_t sig, struct stat_info *s
 			if (now_ms() - last > 500) {
 				last = now_ms();
 				st->secs = (long)(frames / rate);
-				st->bytes = file_size(path);
+				st->bytes = file_size(part);
 				write_status(st);
 			}
 		}
-		FLAC__stream_encoder_finish(enc);
+		if (!FLAC__stream_encoder_finish(enc) && !rc && !g_stop) {
+			fail(st, "encoder failed (disk full?)");
+			rc = 6;
+		}
 		FLAC__stream_encoder_delete(enc);
 		dvd_pcm_done(&pc);
 		if (g_stop || rc)
-			unlink(path);   /* a half-ripped chapter is not kept */
+			unlink(part);   /* a half-ripped chapter is not kept */
+		else if (rename(part, path) != 0)
+			unlink(part);
 	}
 	dvd_close(&d);
 	if (!rc && strcmp(st->state, "error")) {
@@ -748,14 +1003,16 @@ static void cdtext_utf8(struct cdtext *c)
 
 	text_to_utf8(c->album, sizeof c->album);
 	text_to_utf8(c->artist, sizeof c->artist);
+	text_to_utf8(c->genre, sizeof c->genre);
 	for (i = 0; i <= MAXTRK; i++) {
 		text_to_utf8(c->title[i], sizeof c->title[0]);
 		text_to_utf8(c->perf[i], sizeof c->perf[0]);
+		text_to_utf8(c->composer[i], sizeof c->composer[0]);
 	}
 }
 
 struct trktags {
-	const char *title, *artist, *album, *albumartist;
+	const char *title, *artist, *album, *albumartist, *composer, *genre;
 	int track, total;
 	long frames;   /* CD frames (1/75 s) in the track */
 };
@@ -836,6 +1093,8 @@ static int mp3_open(struct sink *s, int fmt, const char *path, const struct trkt
 	id3_text(g, "TPE1", tg->artist);
 	id3_text(g, "TALB", tg->album);
 	id3_text(g, "TPE2", tg->albumartist);
+	id3_text(g, "TCOM", tg->composer);
+	id3_text(g, "TCON", tg->genre);
 	snprintf(both, sizeof both, "%d/%d", tg->track, tg->total);
 	id3tag_set_textinfo_latin1(g, "TRCK", both);
 	if (lame_init_params(g) < 0) {
@@ -864,7 +1123,7 @@ static int mp3_open(struct sink *s, int fmt, const char *path, const struct trkt
 static int sink_open(struct sink *s, int fmt, const char *path, const struct trktags *tg)
 {
 	char num[16], tot[16];
-	const char *tags[6][2];
+	const char *tags[8][2];
 
 	memset(s, 0, sizeof *s);
 	s->fmt = fmt;
@@ -878,7 +1137,9 @@ static int sink_open(struct sink *s, int fmt, const char *path, const struct trk
 	tags[3][0] = "ALBUMARTIST"; tags[3][1] = tg->albumartist;
 	tags[4][0] = "TRACKNUMBER"; tags[4][1] = num;
 	tags[5][0] = "TRACKTOTAL";  tags[5][1] = tot;
-	s->flac = enc_open(path, 2, 16, 44100, tags, 6);
+	tags[6][0] = "COMPOSER";    tags[6][1] = tg->composer;
+	tags[7][0] = "GENRE";       tags[7][1] = tg->genre;
+	s->flac = enc_open(path, 2, 16, 44100, tags, 8);
 	return s->flac ? 0 : -1;
 }
 
@@ -906,9 +1167,9 @@ static int sink_close(struct sink *s, int keep)
 	int rc = 0;
 
 	if (s->fmt == RIP_FLAC) {
-		FLAC__stream_encoder_finish(s->flac);
+		rc = FLAC__stream_encoder_finish(s->flac) ? 0 : -1;   /* the last block did not fit: a short file is no track */
 		FLAC__stream_encoder_delete(s->flac);
-		return 0;
+		return rc;
 	}
 	if (keep) {
 		static unsigned char lametag[4096];
@@ -1033,17 +1294,32 @@ static int rq_finish(int discard)
 	return failed ? -1 : 0;
 }
 
+/* More unreadable sectors than this in one track and the disc is given up: it would take hours, and the file would be
+ * mostly silence. */
+#define BAD_LIMIT 1500
+
 static int cmd_cd(int only, const char *dir_arg, int fmt)
 {
 	struct stat_info st;
 	struct toc t;
 	struct cdtext ct;
-	char base[400], album_dir[400];
+	char base[400], album_dir[400], date[40];
 	static uint8_t raw[CHUNK * CD_FRAMESIZE_RAW];
 	static int16_t pcm[CHUNK * 588 * 2];
-	int fd, r, trk, ntracks = 0, done = 0;
+	const char *ext = fmt == RIP_FLAC ? "flac" : "mp3";
+	uint32_t sig;
+	time_t now = time(NULL);
+	struct tm tm;
+	int fd, r, trk, ntracks = 0, done = 0, ripped = 0, kept = 0;
 
 	memset(&st, 0, sizeof st);
+	crc_init();
+	{
+		const char *ft = getenv("X45REC_FAULT");
+
+		if (ft)
+			sscanf(ft, "%d-%d", &fault_lo, &fault_hi);
+	}
 	if (dir_arg)
 		snprintf(base, sizeof base, "%s", dir_arg);
 	else if (find_target(base, sizeof base) < 0) {
@@ -1055,47 +1331,76 @@ static int cmd_cd(int only, const char *dir_arg, int fmt)
 		fail(&st, "no disc");
 		return 3;
 	}
+	sig = toc_sig(&t);
 	for (trk = t.first; trk <= t.last; trk++)
 		if (t.audio[trk] && (!only || trk == only))
 			ntracks++;
 	if (!ntracks) {   /* no audio track: a video DVD has its sound in files, not in tracks */
-		uint32_t sig = toc_sig(&t);
-
 		close(fd);
 		return cmd_dvd(only, base, sig, &st);
 	}
 	load_cdtext(&ct);
 	cdtext_utf8(&ct);
 	{
-		char a[120], b[120];
+		char name[260];
 
-		snprintf(a, sizeof a, "%s", ct.artist[0] ? ct.artist : "Unknown Artist");
-		snprintf(b, sizeof b, "%s", ct.album[0] ? ct.album : "Audio CD");
-		sanitize(a);
-		sanitize(b);
-		snprintf(album_dir, sizeof album_dir, "%s/%s - %s", base, a, b);
+		if (ct.artist[0] || ct.album[0]) {
+			char a[120], b[120];
+
+			snprintf(a, sizeof a, "%s", ct.artist[0] ? ct.artist : "Unknown Artist");
+			snprintf(b, sizeof b, "%s", ct.album[0] ? ct.album : "Audio CD");
+			sanitize(a);
+			sanitize(b);
+			snprintf(name, sizeof name, "%s - %s", a, b);
+		} else {
+			/* a disc nothing is known about: its number keeps it apart from the next such disc */
+			snprintf(name, sizeof name, "Unknown Artist - Audio CD %08x", (unsigned)sig);
+		}
+		pick_dir(album_dir, sizeof album_dir, base, name, sig);
 	}
-	mkdir_p(album_dir);
+	snprintf(st.dir, sizeof st.dir, "%s", album_dir);
+	if (now > 1700000000 && localtime_r(&now, &tm))
+		strftime(date, sizeof date, "%Y-%m-%d %H:%M", &tm);
+	else
+		snprintf(date, sizeof date, "clock not set");
+	log_line(album_dir, "\n# x45rec rip, %s\ndisc %08x\nformat %s\nupc %s\n"
+		 "# track <n> <ok|damaged> <format> <crc32 of the PCM> <unreadable sectors> <peak %%> <frames> <file> <note>\n",
+		 date, (unsigned)sig, ext, ct.upc);
 	signal(SIGTERM, on_term);
 	signal(SIGINT, on_term);
 	st.state = "ripping";
 	st.tracks = ntracks;
+	write_status(&st);
 
 	for (trk = t.first; trk <= t.last && !g_stop; trk++) {
 		int32_t lba, end;
-		char name[200], path[600];
+		char name[200], path[600], part[610], pfile[300], note[160], full[700];
 		struct trktags tg;
 		struct sink sink;
+		struct rdstat rs;
 		long long frames = 0;
 		long last = now_ms() - 1000;
-		int ok = 1;
+		uint32_t crc = 0xffffffffu, pcrc = 0;
+		int ok = 1, peak = 0, pok = 0, hadlog, toobad = 0;
 
 		if (!t.audio[trk] || (only && trk != only))
 			continue;
 		st.track = ++done;
 		snprintf(name, sizeof name, "%02d %s", trk, ct.title[trk][0] ? ct.title[trk] : "Track");
 		sanitize(name);
-		snprintf(path, sizeof path, "%s/%s.%s", album_dir, name, fmt == RIP_FLAC ? "flac" : "mp3");
+		/* the same track already ripped whole in this format (an interrupted rip, a second go): it stays as it is */
+		if (log_find(album_dir, trk, ext, &pcrc, &pok, pfile, sizeof pfile) && pok) {
+			snprintf(full, sizeof full, "%s/%s", album_dir, pfile);
+			if (file_exists(full)) {
+				kept++;
+				fprintf(stderr, "x45rec: track %d is there already, kept\n", trk);
+				continue;
+			}
+		}
+		hadlog = log_find(album_dir, trk, NULL, &pcrc, &pok, pfile, sizeof pfile);   /* for the comparison below */
+		unique_file(path, sizeof path, album_dir, name, ext);
+		snprintf(part, sizeof part, "%s.part", path);
+		unlink(part);   /* a link or an old half file on the disk is replaced, never written through */
 		snprintf(st.file, sizeof st.file, "%s", path);
 		lba = t.start[trk];
 		end = track_end(&t, trk);
@@ -1103,37 +1408,48 @@ static int cmd_cd(int only, const char *dir_arg, int fmt)
 		tg.artist = ct.perf[trk][0] ? ct.perf[trk] : ct.artist;
 		tg.album = ct.album;
 		tg.albumartist = ct.artist;
+		tg.composer = ct.composer[trk];
+		tg.genre = ct.genre;
 		tg.track = trk;
 		tg.total = t.last - t.first + 1;
 		tg.frames = end - lba;
-		if (sink_open(&sink, fmt, path, &tg) < 0) {
+		if (sink_open(&sink, fmt, part, &tg) < 0) {
 			fail(&st, "cannot write the file");
 			close(fd);
 			return 5;
 		}
 		if (rq_start(&sink) != 0) {
 			sink_close(&sink, 0);
-			unlink(path);
+			unlink(part);
 			fail(&st, "cannot start the encoder");
 			close(fd);
 			return 5;
 		}
+		memset(&rs, 0, sizeof rs);
 		while (lba < end && !g_stop) {
-			struct cd_readaudio ra;
-			int n = end - lba < CHUNK ? (int)(end - lba) : CHUNK, i, tries;
+			int n = end - lba < CHUNK ? (int)(end - lba) : CHUNK, i;
+			int bad = read_frames(fd, lba, n, raw, &rs);
 
-			for (tries = 0; tries < 3; tries++) {
-				ra.addr = lba;
-				ra.addr_format = CDROM_LBA;
-				ra.nframes = n;
-				ra.buf = raw;
-				if (ioctl(fd, CDROMREADAUDIO, &ra) == 0)
+			if (bad) {
+				st.bad += bad;
+				fprintf(stderr, "x45rec: track %d: %d unreadable sector(s) at %d\n", trk, bad, (int)lba);
+				snprintf(st.msg, sizeof st.msg, "%d unreadable sectors so far", st.bad);
+				write_status(&st);
+				if (rs.bad > BAD_LIMIT) {
+					toobad = 1;
 					break;
+				}
 			}
-			if (tries == 3)
-				memset(raw, 0, (size_t)n * CD_FRAMESIZE_RAW);   /* unreadable: silence */
-			for (i = 0; i < n * 588 * 2; i++)
-				pcm[i] = (int16_t)(raw[i * 2] | raw[i * 2 + 1] << 8);
+			crc = crc_update(crc, raw, (size_t)n * CD_FRAMESIZE_RAW);
+			for (i = 0; i < n * 588 * 2; i++) {
+				int v = (int16_t)(raw[i * 2] | raw[i * 2 + 1] << 8);
+
+				pcm[i] = (int16_t)v;
+				if (v < 0)
+					v = -v;
+				if (v > peak)
+					peak = v;
+			}
 			if (!rq_push(pcm, n * 588))
 				break;   /* stopped, or the encoder failed: rq_finish tells which */
 			lba += n;
@@ -1141,25 +1457,66 @@ static int cmd_cd(int only, const char *dir_arg, int fmt)
 			if (now_ms() - last > 500) {
 				last = now_ms();
 				st.secs = frames / 44100;
-				st.bytes = file_size(path);
+				st.bytes = file_size(part);
 				write_status(&st);
 			}
 		}
-		if (rq_finish(g_stop) != 0)
+		if (rq_finish(g_stop || toobad) != 0)
 			ok = 0;
-		if (sink_close(&sink, ok && !g_stop) != 0)
+		if (sink_close(&sink, ok && !g_stop && !toobad) != 0)
 			ok = 0;
+		if (toobad) {
+			unlink(part);
+			log_line(album_dir, "# track %d given up: more than %d unreadable sectors\n", trk, BAD_LIMIT);
+			fail(&st, "the disc cannot be read (scratched or dirty?)");
+			close(fd);
+			return 7;
+		}
 		if (!ok) {
-			unlink(path);
+			unlink(part);
 			fail(&st, "encoder failed (disk full?)");
 			close(fd);
 			return 6;
 		}
-		if (g_stop)
-			unlink(path);   /* a half-ripped track is not kept */
+		if (g_stop) {
+			unlink(part);   /* a half-ripped track is not kept */
+			log_line(album_dir, "# stopped during track %d\n", trk);
+			break;
+		}
+		if (rename(part, path) != 0) {
+			unlink(part);
+			fail(&st, "cannot write the file");
+			close(fd);
+			return 5;
+		}
+		crc ^= 0xffffffffu;
+		note[0] = '\0';
+		if (rs.bad) {
+			int k, off = snprintf(note, sizeof note, "unreadable at sector");
+
+			for (k = 0; k < rs.bad && k < 8 && off < (int)sizeof note - 12; k++)
+				off += snprintf(note + off, sizeof note - (size_t)off, " %d", (int)rs.at[k]);
+			if (rs.bad > 8)
+				snprintf(note + off, sizeof note - (size_t)off, " ...");
+		} else if (hadlog) {
+			snprintf(note, sizeof note, crc == pcrc ? "same audio as the earlier rip" : "differs from the earlier rip");
+		}
+		{
+			const char *base_name = strrchr(path, '/');
+
+			log_line(album_dir, "track\t%02d\t%s\t%s\t%08x\t%d\t%d\t%lld\t%s\t%s\n", trk, rs.bad ? "damaged" : "ok", ext,
+				 (unsigned)crc, rs.bad, (peak * 100 + 16383) / 32768, frames, base_name ? base_name + 1 : path, note);
+		}
+		ripped++;
 	}
 	close(fd);
 	if (strcmp(st.state, "error")) {
+		if (st.bad)
+			snprintf(st.msg, sizeof st.msg, "ripped, but %d sectors could not be read: see the rip log", st.bad);
+		else if (kept && !ripped)
+			snprintf(st.msg, sizeof st.msg, "already ripped, nothing was overwritten");
+		else
+			st.msg[0] = '\0';
 		st.state = "done";
 		write_status(&st);
 	}

@@ -23,6 +23,7 @@ goes away by itself after 8 seconds.
 | Display: Text | pixels / smooth / font | `font_smooth` |
 | Display: Screen off | never, 15 s .. 1 h idle | `screen_off` (seconds) |
 | Display: Input in the top bar | icon / name | `input_icons` |
+| Display: Artwork | off, library only (the picture a file holds or its folder has), library and internet (also the album cover of a track, the cover of the song a radio station announces and the station's logo, looked up on iTunes and radio-browser: the artist and title, or the station, leave the unit) | `artwork` (0, 1, 2; default 2) |
 | Visualizers: Visualizers | same on all inputs / per input | `vis_scope` (`all`/`input`), `vis_all_set` (bit mask), `vis_<input>` |
 | Visualizers: Spectrum style | bars with peaks, LED cells, mirrored, curve (the four spectrum visuals of before, now one) | `spec_style` (0..3) |
 | Visualizers: Spectrum bands | 16, 24, 32, 48, 64, 96, 128 bands | `bands` |
@@ -35,6 +36,8 @@ goes away by itself after 8 seconds.
 | Controls: Knob skip | 1 (every click skips) .. 10 clicks | `rb_steps` |
 | Controls: Resume at start | last input and radio station at start | `resume`, `input`, `last_radio`, `last_radio_url` |
 | Controls: CD rip format | FLAC (lossless, the default), MP3 320 kbps (constant), MP3 V0 (variable, LAME -V0, about 220-260 kbps); only for ripping an audio CD, the video DVD sound and the recordings of inputs stay FLAC | `rip_format` (`flac`, `mp3`, `mp3v0`) |
+| Child lock | OK on the question locks the panel and the remote; hold OK for 3 s to unlock; the web page and the apps keep working (see X45-RELIABILITY.md) | file `etc/childlock`; `childlock_volume` (0/1: volume keys stay live) |
+| Clock and sleep timer | sleep minutes (off, 15, 30, 45, 60, 90, 120), end action (stop and sleep / switch off), timer in the top bar, clock after idle, 24 h, seconds | `sleep_action`, `clock_bar`, `clock_idle`, `clock_24h`, `clock_secs` |
 
 The Visualizers group lists only what belongs to the visuals that are switched on right now (for this input, or for all
 of them): *Spectrum bands* with the spectrum or the waterfall, *Spectrum style* and *Bar colours* with the spectrum (the
@@ -71,6 +74,16 @@ colour, bars and size) from the player without the way through the options; RETU
 The same menu holds, depending on the input: FM: save station, scan; DAB: scan; Bluetooth:
 pair a new device, forget all devices. Internet radio stations are saved from the library
 side (the FRITZ!Box list), not from the panel. A scan asks "are you sure?" first.
+
+## Bluetooth output
+
+**Options > Bluetooth output** sends what MPD plays to a Bluetooth headset or speaker. The first row switches the output on
+(it uses the radio stick, so it is not available while the Bluetooth *input* is chosen), the second searches. Devices that were
+paired before are listed with "paired", the one in use with "connected". OK on a device opens a small menu (connect or disconnect,
+forget; forget asks twice); OK on a new device pairs and connects it, and a new device has to be in pairing mode at that moment.
+A paired device is called again by itself whenever it is switched on; disconnecting it by hand stops that. While it is connected the
+speakers are silent and the volume knob sets the level at the device, the top bar shows "BT", and when the device goes away the
+sound returns to the speakers. The same controls are on the web page ("BT out"). Details: X45-BLUETOOTH.md.
 
 ## Other controls
 

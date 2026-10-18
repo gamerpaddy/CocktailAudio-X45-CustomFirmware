@@ -37,9 +37,7 @@ alive() {	# pidfile $1 names a running process
 	[ -f "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null
 }
 
-do_start() {
-	exec 9> /tmp/x45wifi.lock
-	flock 9
+start_body() {   # with the lock (fd 9) held
 	mkdir -p $RUN $STATE
 	chmod 700 $STATE
 	if alive $RUN/wpa.pid && [ -S $RUN/$IF ]; then
@@ -71,8 +69,12 @@ do_start() {
 	pkill -x wpa_supplicant 2>/dev/null
 	rm -f $RUN/$IF
 	ip link set $IF up
-	# the daemons must not inherit the lock (fd 9), or the next x45wifi-run waits for them to exit
-	$BIN/wpa_supplicant -B -Dnl80211 -i$IF -c $CONF -P $RUN/wpa.pid -f $RUN/wpa.log 9>&- || fail "wpa_supplicant would not start"
+	# the daemons must not inherit the lock (fd 9), or the next x45wifi-run waits for them to exit.
+	# Its log (-f) only on request, with the file wifi/state/debug: it grows for as long as WiFi is on and not joined (RAM)
+	LOGOPT=
+	rm -f $RUN/wpa.log
+	[ -f $STATE/debug ] && LOGOPT="-f $RUN/wpa.log"
+	$BIN/wpa_supplicant -B -Dnl80211 -i$IF -c $CONF -P $RUN/wpa.pid $LOGOPT 9>&- || fail "wpa_supplicant would not start"
 	n=0
 	while [ ! -S $RUN/$IF ] && [ $n -lt 20 ]; do
 		sleep 0.5
@@ -82,6 +84,12 @@ do_start() {
 	pkill -x wpa_cli 2>/dev/null
 	$BIN/wpa_cli -B -a $BIN/x45wifi-event -i $IF -p $RUN -P $RUN/cli.pid >/dev/null 2>&1 9>&-
 	status ready ""
+}
+
+do_start() {
+	exec 9> /tmp/x45wifi.lock
+	flock 9
+	start_body
 }
 
 do_stop() {
@@ -95,12 +103,24 @@ do_stop() {
 	status off ""
 }
 
+# on and off act on the flag as it is when they get the lock: whoever asked last wins, and a start that is under way
+# (half a minute) is not left running by an "off" that came in the middle
+apply() {
+	exec 9> /tmp/x45wifi.lock
+	flock 9
+	if [ -f $STATE/enabled ]; then
+		start_body
+	else
+		do_stop
+	fi
+}
+
 case "$1" in
 start)	do_start ;;
 stop)	do_stop ;;
 boot)	[ -f $STATE/enabled ] && do_start ;;
-on)	mkdir -p $STATE; touch $STATE/enabled; do_start ;;
-off)	rm -f $STATE/enabled; do_stop ;;
+on)	mkdir -p $STATE; touch $STATE/enabled; apply ;;
+off)	rm -f $STATE/enabled; apply ;;
 status)	cat $ST 2>/dev/null || echo "state=off" ;;
 *)	echo "usage: x45wifi-run start|stop|boot|on|off|status" >&2; exit 2 ;;
 esac

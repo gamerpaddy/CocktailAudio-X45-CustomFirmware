@@ -26,14 +26,14 @@ put_optional() { # put_optional PART SOURCE NAME
 }
 
 log "programs"
-for p in x45ctl x45fb x45in x45mpc x45ui x45play x45loop x45cd x45rec x45tuner x45web x45upnp x45rb x45wifi; do
+for p in x45ctl x45fb x45in x45mpc x45ui x45play x45loop x45cd x45rec x45tuner x45web x45upnp x45rb x45wifi x45wd x45art; do
 	put "$OUT/$p" "$p"
 done
 put "$WORK/mpd-build/mpd.stripped" mpd
 
 # shell scripts of the stack (start up, helpers for the receivers, the Wi-Fi hooks)
 for f in x45stack x45media x45radio-sync x45ftp x45-airplay-begin x45-airplay-end x45-spotify-event \
-	x45bt-run x45wifi-run x45wifi-dhcp x45wifi-event; do
+	x45bt-run x45btout-run x45wifi-run x45wifi-dhcp x45wifi-event; do
 	[ -f "$X45_ROOT/deploy/$f" ] || die "missing deploy/$f"
 	sed 's/\r$//' "$X45_ROOT/deploy/$f" >"$T/bin/$f"
 	chmod 755 "$T/bin/$f"

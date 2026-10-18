@@ -20,7 +20,7 @@
 #define STBI_NO_STDIO
 #define STBI_NO_HDR
 #define STBI_NO_LINEAR
-#define STBI_MAX_DIMENSIONS 4096
+#define STBI_MAX_DIMENSIONS 1024   /* what the panel shows is at most 300 px (x45art shrinks covers first, DAB slides are 320x240): a bigger header is refused before any pixel is allocated, so a hostile 200 KB file cannot cost 300 MB */
 #include "stb_image.h"
 #pragma GCC diagnostic pop
 

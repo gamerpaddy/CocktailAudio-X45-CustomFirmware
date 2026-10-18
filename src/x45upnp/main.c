@@ -114,6 +114,7 @@ static char *http(const char *method, const char *url, const char *soapaction, c
 {
 	char host[128], path[512], hdr[1024];
 	int port, fd, n, cap = 65536, len = 0;
+	long t0;
 	char *buf, *b, *he;
 
 	if (split_url(url, host, sizeof host, &port, path, sizeof path) < 0)
@@ -137,8 +138,11 @@ static char *http(const char *method, const char *url, const char *soapaction, c
 		close(fd);
 		return NULL;
 	}
+	t0 = now_ms();
 	while ((n = read(fd, buf + len, cap - len)) > 0) {
 		len += n;
+		if (now_ms() - t0 > 15000)   /* the 8 s receive limit is per read: a server that drips bytes must not hold us */
+			break;
 		if (len == cap) {
 			char *nb;
 
@@ -433,8 +437,10 @@ static int browse(const char *ctrl, const char *id)
 		const char *kind = pass ? "<item" : "<container";
 		const char *close_ = pass ? "</item>" : "</container>";
 
+		int seen = 0;   /* entries that print nothing count too: a hostile reply of empty containers is bounded */
+
 		p = res;
-		while ((p = strstr(p, kind)) != NULL && n < MAXITEMS * 2) {
+		while ((p = strstr(p, kind)) != NULL && n < MAXITEMS * 2 && seen++ < MAXITEMS * 4) {
 			char c = p[strlen(kind)];
 			const char *tend = strchr(p, '>'), *end;
 			char eid[300] = "", title[300] = "", url[600] = "", proto[200], cls[100] = "";
@@ -497,6 +503,7 @@ static int browse(const char *ctrl, const char *id)
 int main(int argc, char **argv)
 {
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	alarm(40);   /* a silent or dripping server must not hold the panel for minutes (lines already printed are out) */
 	if (argc >= 2 && !strcmp(argv[1], "discover"))
 		return discover(argc >= 3 ? atoi(argv[2]) : 2500);
 	if (argc >= 4 && !strcmp(argv[1], "browse"))

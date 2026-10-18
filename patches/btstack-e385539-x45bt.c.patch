@@ -572,6 +572,15 @@
  
  static void playback_handler(int16_t * buffer, uint16_t num_audio_frames, const btstack_audio_context_t * context){
      UNUSED(context);
+@@ -392,7 +475,7 @@
+ #endif
+     
+     // called from lower-layer but guaranteed to be on main thread
+-    if (sbc_frame_size == 0){
++    if (sbc_frame_size == 0 || sbc_frame_size > MAX_SBC_FRAME_SIZE){   // x45: the size was set from a remote packet; it must fit the stack buffer below
+         memset(buffer, 0, num_audio_frames * BYTES_PER_FRAME);
+         return;
+     }
 @@ -412,6 +495,12 @@
          btstack_ring_buffer_read(&sbc_frame_ring_buffer, sbc_frame, sbc_frame_size, &bytes_read);
          sbc_decoder_instance->decode_signed_16(&sbc_decoder_context, 0, sbc_frame, sbc_frame_size);
@@ -594,9 +603,14 @@
      if (audio){
          audio->start_stream();
      }
-@@ -569,9 +660,40 @@
+@@ -568,10 +659,45 @@
+     }
  
      // store sbc frame size for buffer management
++    // x45: num_frames and the length come from the remote device. Zero frames would divide by zero, and a frame size above
++    // MAX_SBC_FRAME_SIZE would be read into a stack buffer of that size by playback_handler. Such a packet is dropped and
++    // the size of the last good one stays.
++    if (sbc_header.num_frames == 0 || packet_length < (int) sbc_header.num_frames || packet_length / sbc_header.num_frames > MAX_SBC_FRAME_SIZE) return;
      sbc_frame_size = packet_length / sbc_header.num_frames;
 +    {   // x45: where does a stutter come from? count what the phone sent against what arrived (RTP sequence), the
 +        // packets that came late (gaps), and what the decoder made of them; one line every 5 s while streaming
@@ -636,14 +650,7 @@
      }
  
      // decide on audio sync drift based on number of sbc frames in queue
-@@ -594,14 +716,16 @@
- 
-     // nominal factor (fixed-point 2^16) and compensation offset
-     uint32_t nominal_factor = 0x10000;
--    uint32_t compensation   = 0x00100;
-+    uint32_t compensation   = 0x00010;   /* x45: was 0x100 (0.4%), audible as crackle; real drift is ~100 ppm */
- 
-     if (sbc_frames_in_buffer < OPTIMAL_FRAMES_MIN){
+@@ -600,8 +726,10 @@
      	resampling_factor = nominal_factor - compensation;    // stretch samples
      } else if (sbc_frames_in_buffer <= OPTIMAL_FRAMES_MAX){
      	resampling_factor = nominal_factor;                   // nothing to do
@@ -655,7 +662,7 @@
      }
  
      // assert output buffer is large enough for handle_pcm_data()
-@@ -674,6 +798,7 @@
+@@ -674,6 +802,7 @@
      printf("\n");
  }
  
@@ -663,7 +670,7 @@
  static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size){
      UNUSED(channel);
      UNUSED(size);
-@@ -681,109 +806,145 @@
+@@ -681,109 +810,145 @@
  
      bd_addr_t address;
      switch (hci_event_packet_get_type(packet)){
@@ -892,7 +899,7 @@
  
      a2dp_sink_demo_avrcp_connection_t * connection = &a2dp_sink_demo_avrcp_connection;
  
-@@ -791,284 +952,86 @@
+@@ -791,284 +956,86 @@
      if (hci_event_packet_get_type(packet) != HCI_EVENT_AVRCP_META) return;
      switch (packet[2]){
          case AVRCP_SUBEVENT_CONNECTION_ESTABLISHED: {
@@ -1204,7 +1211,7 @@
      }
  }
  
-@@ -1135,6 +1098,7 @@
+@@ -1135,6 +1102,7 @@
              a2dp_conn->a2dp_cid = a2dp_subevent_stream_established_get_a2dp_cid(packet);
              a2dp_conn->a2dp_local_seid = a2dp_subevent_stream_established_get_local_seid(packet);
              a2dp_conn->stream_state = STREAM_STATE_OPEN;
@@ -1212,7 +1219,7 @@
  
              printf("A2DP  Sink      : Streaming connection is established, address %s, cid 0x%02x, local seid %d\n",
                     bd_addr_to_str(a2dp_conn->addr), a2dp_conn->a2dp_cid, a2dp_conn->a2dp_local_seid);
-@@ -1153,6 +1117,7 @@
+@@ -1153,6 +1121,7 @@
          case A2DP_SUBEVENT_STREAM_STARTED:
              printf("A2DP  Sink      : Stream started\n");
              a2dp_conn->stream_state = STREAM_STATE_PLAYING;
@@ -1220,7 +1227,7 @@
              if (a2dp_conn->sbc_configuration.reconfigure){
                  media_processing_close();
              }
-@@ -1164,18 +1129,25 @@
+@@ -1164,18 +1133,25 @@
          case A2DP_SUBEVENT_STREAM_SUSPENDED:
              printf("A2DP  Sink      : Stream paused\n");
              a2dp_conn->stream_state = STREAM_STATE_PAUSED;
@@ -1246,7 +1253,7 @@
              media_processing_close();
              break;
          
-@@ -1184,267 +1156,90 @@
+@@ -1184,267 +1160,90 @@
      }
  }
  

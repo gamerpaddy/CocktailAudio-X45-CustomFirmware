@@ -23,8 +23,9 @@ POST /api/files/zip?p=A&p=B[&name=N.zip]       the selection as one stored zip, 
                                                (GET works too, so a plain link can carry the selection; add tok= with a web_token)
 ```
 
-Paths are absolute and percent-encoded with `encodeURIComponent` (a space is `%20`; `+` stays a plus, so a client
-that encodes spaces as `+` gets "no such file").
+Paths are absolute and percent-encoded with `encodeURIComponent` (a space is `%20`; in the query string `+` stays a
+plus, so a client that encodes spaces as `+` gets "no such file"). Only a form body (`application/x-www-form-urlencoded`
+POST) reads `+` as a space. A selection holds at most 500 items (`p` repeated); more answers 413.
 
 ## Writing
 
@@ -38,6 +39,11 @@ POST /api/files/op?cmd=delete&p=A&p=B
 
 `op` answers `{"done":n,"failed":n,"error":"first reason"}`. With a `web_token` set every request needs it
 (`Authorization: Bearer`, or `tok=` in the query for links).
+
+Web pages of other sites cannot use the file manager or any other POST/PUT: a request that carries an `Origin` other
+than the unit's own `Host` answers 403, a `Host` that is a foreign name (DNS rebinding) answers 403, and no
+`Access-Control-Allow-*` header is sent. Programs without an `Origin` header (curl, apps, scripts) are not affected.
+`web_cross_site = on` in `etc/x45ui.conf` restores the former open CORS for a page of your own on another host.
 
 How a change is made:
 

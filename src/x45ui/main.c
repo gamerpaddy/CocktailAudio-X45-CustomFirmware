@@ -107,6 +107,11 @@
 #define IR_BALANCE 466   /* the "Vol balance" key: ext/balance.c */
 #define IR_PLAYLIST 467
 #define IR_SEARCH  67    /* the search key: ext/search.c */
+#define IR_CLOCK   359   /* the clock key: ext/clock.c */
+#define IR_SLEEP   142   /* the sleep key: the sleep timer, ext/clock.c */
+#define IR_RED     398   /* the coloured keys: RED stars the song on air, YELLOW opens the song log (ext/songlog.c) */
+#define IR_YELLOW  400
+#define IR_BLUE    401   /* the signal path (ext/path.c) */
 #define IR_BKSP    472   /* backspace (held: goes on deleting) */
 #define IR_NUM0    512   /* the number keys: 513..521 are 1..9 */
 #define IR_NUM1    513
@@ -142,9 +147,32 @@ static inline long ms_since(long now, long t)
 	return (long)((unsigned long)now - (unsigned long)t);
 }
 
+/* A deadline t is due when it has passed. 0 is "never set" (due), and so is a deadline that lies more than an hour
+ * behind or ahead on the signed scale: nothing here is ever scheduled that far ahead, so such a value is an old
+ * one that went past the 24.8 days a signed difference can show. */
 static inline int ms_due(long now, long t)
 {
-	return ms_since(now, t) >= 0;
+	long d;
+
+	if (!t)
+		return 1;
+	d = ms_since(now, t);
+	return d >= 0 || d < -3600000L;
+}
+
+/* Milliseconds since a stamp taken in the past: LONG_MAX for 0 (never set) and for a stamp too old to tell (a signed
+ * difference is wrong from 24.8 days on, which made "now - stamp < N" true for ever for a stamp that was never
+ * refreshed); a stamp a moment ahead of `now` (taken by a later call in the same pass) is 0. */
+static inline long ms_age(long now, long t)
+{
+	long d;
+
+	if (!t)
+		return LONG_MAX;
+	d = ms_since(now, t);
+	if (d < -2000)
+		return LONG_MAX;
+	return d < 0 ? 0 : d;
 }
 
 static int cd_active(const struct ui *u);
@@ -340,7 +368,7 @@ void text_scroll(struct ui *u, int slot, int x, int y, const char *utf8, int sca
 		travel = 1;
 	run_ms = (long)travel * 1000 / SC_PX_S;
 	cyc = SC_REST_MS + run_ms + SC_REST_MS;
-	t = (now - t0[slot]) % cyc;
+	t = (long)(((unsigned long)now - (unsigned long)t0[slot]) % (unsigned long)cyc);
 	if (t < SC_REST_MS)
 		off = 0;
 	else if (t < SC_REST_MS + run_ms)
@@ -531,10 +559,12 @@ static void scr_poll(struct ui *u)
 #define SETTLE_MS 500
 #define SETTLE_MAX_MS 8000   /* a stream that never comes up does not keep the unit silent */
 
+static int bt_hw_mute;   /* the sound goes to a Bluetooth device: the main output is held muted meanwhile */
+
 static void settle_hw(struct ui *u)
 {
 	if (u->x45fd >= 0)
-		x45_mute(u->x45fd, u->muted || u->settle_until != 0);
+		x45_mute(u->x45fd, u->muted || u->settle_until != 0 || bt_hw_mute);
 }
 
 /* a stream is about to start: mute until it is up */
@@ -801,7 +831,7 @@ static void draw_header(struct ui *u)
 		static const char *const optcat_title[] = { "OPTIONS - SOUND", "OPTIONS - DISPLAY", "OPTIONS - VISUALIZERS", "OPTIONS - CONTROLS" };
 
 		skin_bar(u, u->screen == SCR_OPTCAT && u->opt_cat >= 0 && u->opt_cat < 4 ? optcat_title[u->opt_cat] :
-			 u->screen == SCR_EXT && u->ext ? u->ext->title : titles[u->screen]);
+			 u->screen == SCR_EXT && u->ext ? (u->ext->title ? u->ext->title : "") : titles[u->screen]);
 	}
 
 	{
@@ -881,7 +911,7 @@ static void draw_header(struct ui *u)
 		int tw, bx;
 
 		if (u->rec_cd)
-			snprintf(r, sizeof r, "RIP %d/%d", u->rec_track, u->rec_tracks);
+			snprintf(r, sizeof r, u->rec_bad ? "RIP %d/%d  %d BAD" : "RIP %d/%d", u->rec_track, u->rec_tracks, u->rec_bad);
 		else
 			snprintf(r, sizeof r, "REC %02ld:%02ld", u->rec_secs / 60, u->rec_secs % 60);
 		/* a solid badge in the warning colour, not a line of small text: it must be seen from across the room */
@@ -900,9 +930,16 @@ static void draw_header(struct ui *u)
 #define VOL_FADE_IN_MS  120
 #define VOL_FADE_OUT_MS 450
 
+/* the sound is going to a Bluetooth device: its level is the software mixer of that output, and the knob moves it
+ * even while the line outputs are fixed */
+static int bt_volume(const struct ui *u)
+{
+	return ui_btout_routed() && u->input == X45_IN_NETWORK;
+}
+
 static int vol_relevant(const struct ui *u)
 {
-	return !(u->vol_fixed && !u->hp_present);
+	return !(u->vol_fixed && !u->hp_present && !bt_volume(u));
 }
 
 /* with fixed outputs the volume is not the owner's to change: the level stays where it is */
@@ -923,7 +960,7 @@ static void vol_anim(struct ui *u)
 	float a = u->vol_a, target;
 
 	u->vol_t = now;
-	target = vol_relevant(u) && u->last_vol_change && now - u->last_vol_change < VOL_SHOW_MS ? 255.0f : 0.0f;
+	target = vol_relevant(u) && u->last_vol_change && ms_age(now, u->last_vol_change) < VOL_SHOW_MS ? 255.0f : 0.0f;
 	if (a < target) {
 		a += 255.0f * (float)dt / VOL_FADE_IN_MS;
 		if (a > target)
@@ -950,7 +987,7 @@ static void scroll_poll(struct ui *u)
 	static long last;
 	long now = now_ms();
 
-	if (u->scrolling && now - last >= 50) {
+	if (u->scrolling && ms_age(now, last) >= 50) {
 		last = now;
 		u->dirty = 1;
 	}
@@ -1025,7 +1062,7 @@ static void rb_knob(struct ui *u, int ticks)
 	if (u->input == X45_IN_NETWORK ? !(u->have_song || u->st.length > 0) :
 	    !(u->input == UI_IN_CD || u->input == UI_IN_BT || tuner_input(u)))
 		return;
-	if (u->rb && now - u->rb_t > RB_HOLD_MS)
+	if (u->rb && ms_age(now, u->rb_t) > RB_HOLD_MS)
 		u->rb = 0;
 	u->rb += ticks;
 	u->rb_t = now;
@@ -1221,7 +1258,7 @@ static void meter_poll(struct ui *u)
 		got_any = 1;
 	}
 
-	dt = (float)(now - u->m_last) / 1000.0f;
+	dt = (float)ms_age(now, u->m_last) / 1000.0f;
 	u->m_last = now;
 	for (ch = 0; ch < 2; ch++) {
 		float db = got_any && pk[ch] > 0 ? 20.0f * log10f(pk[ch] / 32768.0f)
@@ -1239,7 +1276,7 @@ static void meter_poll(struct ui *u)
 		if (u->m_lvl[ch] >= u->m_pk[ch]) {
 			u->m_pk[ch] = u->m_lvl[ch];
 			u->m_pk_t[ch] = now;
-		} else if (now - u->m_pk_t[ch] > 1200) {
+		} else if (ms_age(now, u->m_pk_t[ch]) > 1200) {
 			u->m_pk[ch] -= METER_DECAY * dt;
 			if (u->m_pk[ch] < u->m_lvl[ch])
 				u->m_pk[ch] = u->m_lvl[ch];
@@ -1269,7 +1306,7 @@ static void spec_read(struct ui *u)
 		u->sp_wave = 0;
 		return;
 	}
-	if (now - u->sp_read_t < 30)
+	if (ms_age(now, u->sp_read_t) < 30)
 		return;
 	u->sp_read_t = now;
 	if (stat(METER_FILE, &st) < 0 || time(NULL) - st.st_mtime > 2 || !(f = fopen(METER_FILE, "r"))) {
@@ -1397,8 +1434,8 @@ static void draw_meter(struct ui *u)
 	const int w = s->w - 48;
 	int y = 84;
 	long now = now_ms();
-	int signal = u->m_pid > 0 && now - u->m_sig_t < 1500 && u->m_sig_t;
-	int clip = u->m_clip_t && now - u->m_clip_t < 1500;
+	int signal = u->m_pid > 0 && ms_age(now, u->m_sig_t) < 1500 && u->m_sig_t;
+	int clip = u->m_clip_t && ms_age(now, u->m_clip_t) < 1500;
 
 	{
 		char name[48];
@@ -1627,12 +1664,24 @@ static const char *station_name(struct ui *u)
 	const char *name = u->song.name;
 	int i;
 
-	if (!u->nstations && !u->stations_err[0])
+	static long tried;
+	long now = now_ms();
+
+	if (!u->nstations && !u->stations_err[0] && ms_age(now, tried) >= 5000) {   /* an empty list is looked for again now and then, not on every frame */
+		tried = now;
 		radio_load(u);
+	}
 	for (i = 0; i < u->nstations; i++)
 		if (!strcmp(u->stations[i].url, u->song.file))
 			name = u->stations[i].name;
 	return name[0] ? name : "Internet radio";
+}
+
+const char *ui_station_name(struct ui *u)
+{
+	const char *name = station_name(u);
+
+	return strcmp(name, "Internet radio") ? name : "";
 }
 
 /* ----- the facts of the now-playing page, for a skin to lay out (skins/skin.h, struct ui_np) ----- */
@@ -1797,6 +1846,7 @@ static int np_mpd(struct ui *u, struct ui_np *n)
 		n->msg = st->error;
 		n->msg_warn = 1;
 	}
+	n->slide = ui_art_image(u);
 	n->hint = "OK|play/pause;scroll|prev/next;MENU|screens;RETURN|menu;hold MENU|options";
 	return 1;
 }
@@ -1806,8 +1856,8 @@ static int np_mpd(struct ui *u, struct ui_np *n)
 static int np_meter(struct ui *u, struct ui_np *n)
 {
 	long now = now_ms();
-	int signal = u->m_pid > 0 && now - u->m_sig_t < 1500 && u->m_sig_t;
-	int clip = u->m_clip_t && now - u->m_clip_t < 1500;
+	int signal = u->m_pid > 0 && ms_age(now, u->m_sig_t) < 1500 && u->m_sig_t;
+	int clip = u->m_clip_t && ms_age(now, u->m_clip_t) < 1500;
 
 	memset(n, 0, sizeof *n);
 	n->frac = -1;
@@ -1855,7 +1905,8 @@ static void draw_player(struct ui *u)
 	const struct mpdc_status *st = &u->st;
 	const int w = s->w - 48;
 	char buf[160], t1[16], t2[16], desc[64];
-	int y = 84, playing, stream;
+	int y = 84, playing, stream, pw = w;
+	const struct x45_image *pic = ui_art_image(u);
 	double frac;
 
 	if (vis_big(u)) {   /* the stereo field almost fullscreen: one page for every skin, the text a small column */
@@ -1968,22 +2019,26 @@ static void draw_player(struct ui *u)
 	}
 
 	stream = !strncmp(u->song.file, "http", 4) && st->duration <= 0;
+	if (pic) {   /* the picture of what plays, at the right; the text keeps to what is left */
+		pw = w - (pic->w + 24);
+		x45_image_draw(s, pic, s->w - 24 - pic->w, y);
+	}
 	if (stream) {
 		/* internet radio: station name, then what is playing on it, nothing else.
 		 * The name comes from the preset list (the stream's own name tag can be
 		 * a different brand, or missing while it connects) */
-		text_scroll(u, 0, 24, y, station_name(u), 4, w, u->t.text);
+		text_scroll(u, 0, 24, y, station_name(u), 4, pw, u->t.text);
 		if (u->song.title[0])
-			text_scroll(u, 1, 24, y + 50, u->song.title, 3, w, u->t.accent);
+			text_scroll(u, 1, 24, y + 50, u->song.title, 3, pw, u->t.accent);
 		else if (!strcmp(st->state, "play") && st->elapsed < 6)
 			x45_text(s, 24, y + 50, "Connecting...", 3, u->t.dim);
 	} else {
 		/* title falls back to the file name when there is no tag */
-		text_scroll(u, 0, 24, y, u->song.title[0] ? u->song.title : base_name(u->song.file), 4, w, u->t.text);
+		text_scroll(u, 0, 24, y, u->song.title[0] ? u->song.title : base_name(u->song.file), 4, pw, u->t.text);
 		if (u->song.artist[0])
-			text_scroll(u, 1, 24, y + 50, u->song.artist, 3, w, u->t.accent);
+			text_scroll(u, 1, 24, y + 50, u->song.artist, 3, pw, u->t.accent);
 		if (u->song.album[0])
-			text_scroll(u, 2, 24, y + 90, u->song.album, 2, w, u->t.dim);
+			text_scroll(u, 2, 24, y + 90, u->song.album, 2, pw, u->t.dim);
 	}
 
 	if (st->audio[0]) {   /* nothing is decoded while stopped: no format to show */
@@ -1992,13 +2047,13 @@ static void draw_player(struct ui *u)
 			snprintf(buf, sizeof buf, "%s   %d kbps", desc, st->bitrate);
 		else
 			snprintf(buf, sizeof buf, "%s", desc);
-		x45_text_clipped(s, 24, y + 128, buf, 2, w, u->t.text);
+		x45_text_clipped(s, 24, y + 128, buf, 2, pw, u->t.text);
 	}
 
 	/* progress (a live stream has none) */
 	frac = st->duration > 0 ? st->elapsed / st->duration : 0;
 	if (!stream)
-		x45_bar(s, 24, y + 176, w, 22, frac, u->t.barfg, u->t.barbg, u->t.line);
+		x45_bar(s, 24, y + 176, pw, 22, frac, u->t.barfg, u->t.barbg, u->t.line);
 	fmt_time(t1, sizeof t1, st->elapsed);
 	fmt_time(t2, sizeof t2, st->duration);
 	playing = !strcmp(st->state, "play");
@@ -2019,7 +2074,7 @@ static void draw_player(struct ui *u)
 	snprintf(buf, sizeof buf, "%s%s%s%s", st->random ? "shuffle  " : "",
 		 st->repeat ? "repeat  " : "", st->single ? "single  " : "",
 		 st->consume ? "consume" : "");
-	x45_text(s, w - x45_text_w(buf, 2) + 24, y + 264, buf, 2, u->t.dim);
+	x45_text(s, pw - x45_text_w(buf, 2) + 24, y + 264, buf, 2, u->t.dim);
 
 status:
 	if (st->error[0])
@@ -2055,7 +2110,8 @@ static void browse_item(struct ui *u, void *ctx, int i, struct ui_item *it)
 {
 	const struct mpdc_entry *e = &u->rows[i];
 
-	it->action = !strcmp(e->path, "@refresh") || !strcmp(e->path, "@syncrt") || !strcmp(e->path, "@search");   /* commands, not folders */
+	it->action = !strcmp(e->path, "@refresh") || !strcmp(e->path, "@syncrt") || !strcmp(e->path, "@search") ||
+		     !strcmp(e->path, "@more");   /* commands, not folders */
 	it->dir = e->is_dir;
 	if (e->is_dir || e->path[0] == '@')
 		snprintf(it->label, sizeof it->label, "%s", e->name);
@@ -2322,7 +2378,18 @@ static void draw_main(struct ui *u)
 
 	snprintf(buf, sizeof buf, "%s", in_label(u->input));
 	kv_row(u, y, 3, "Input", buf, u->t.text); y += 38;
-	kv_row(u, y, 3, "Headphones", u->hp_present ? "plugged in" : "not plugged in", u->hp_present ? u->t.accent : u->t.text); y += 38;
+	{   /* the socket, and a Bluetooth headset that the sound goes to */
+		char hp[96];
+		const char *bt = ui_btout_connected_name();
+
+		if (u->hp_present && bt)
+			snprintf(hp, sizeof hp, "plugged in, Bluetooth: %s", bt);
+		else if (bt)
+			snprintf(hp, sizeof hp, "not plugged in, Bluetooth: %s", bt);
+		else
+			snprintf(hp, sizeof hp, "%s", u->hp_present ? "plugged in" : "not plugged in");
+		kv_row(u, y, 3, "Headphones", hp, u->hp_present || bt ? u->t.accent : u->t.text); y += 38;
+	}
 	kv_row(u, y, 3, "PC USB", u->pcusb ? "computer connected" : "no computer", u->pcusb ? u->t.accent : u->t.text); y += 38;
 	/* the CS8422 is shared: on the analogue inputs it locks to the ADC's own
 	 * 192 kHz feed, which says nothing about an S/PDIF cable */
@@ -2454,15 +2521,15 @@ void draw_rows(struct ui *u, const char *const *rows, const char *const *vals, c
 /* ---- the options list ---- */
 enum { OP_VOL, OP_TRIM, OP_RCA, OP_XLR, OP_BL, OP_SCOPE, OP_BANDS, OP_SPECCOL, OP_THEME, OP_COUNT,
        OP_RUBBER, OP_SCROFF, OP_FONT, OP_INICON, OP_RESUME, OP_SKIN, OP_GROUND, OP_INK, OP_GLOOK, OP_GCOL, OP_GBARS, OP_GBIG,
-       OP_RIPFMT, OP_SPECSTYLE, OP_BAL, OP_N };
+       OP_RIPFMT, OP_SPECSTYLE, OP_BAL, OP_ART, OP_N };
 
 /* the options are grouped; OK on a group opens its list */
-#define OPT_MAX 8
+#define OPT_MAX 9   /* the unused places of a row hold -1 */
 static const int optcat_rows[4][OPT_MAX] = {
-	{ OP_VOL, OP_BAL, OP_TRIM, OP_RCA, OP_XLR, -1, -1, -1 },
-	{ OP_BL, OP_SKIN, OP_THEME, OP_GROUND, OP_INK, OP_FONT, OP_SCROFF, OP_INICON },
-	{ OP_SCOPE, OP_SPECSTYLE, OP_BANDS, OP_SPECCOL, OP_GLOOK, OP_GCOL, OP_GBARS, OP_GBIG },
-	{ OP_COUNT, OP_RUBBER, OP_RESUME, OP_RIPFMT, -1, -1, -1, -1 },
+	{ OP_VOL, OP_BAL, OP_TRIM, OP_RCA, OP_XLR, -1, -1, -1, -1 },
+	{ OP_BL, OP_SKIN, OP_THEME, OP_GROUND, OP_INK, OP_FONT, OP_SCROFF, OP_INICON, OP_ART },
+	{ OP_SCOPE, OP_SPECSTYLE, OP_BANDS, OP_SPECCOL, OP_GLOOK, OP_GCOL, OP_GBARS, OP_GBIG, -1 },
+	{ OP_COUNT, OP_RUBBER, OP_RESUME, OP_RIPFMT, -1, -1, -1, -1, -1 },
 };
 
 /* the look option a row belongs to (VIS_LOOK_*), or 0 for one that is always there */
@@ -2504,6 +2571,9 @@ static int optcat_len(const struct ui *u, int cat)
 static const char *const rip_fmt_arg[] = { "flac", "mp3", "mp3v0" };
 static const char *const rip_fmt_name[] = { "FLAC", "MP3 320 kbps", "MP3 V0 (VBR)" };
 #define NRIP_FMT ((int)(sizeof rip_fmt_arg / sizeof *rip_fmt_arg))
+/* the picture of what plays (ext/art.c) */
+static const char *const art_mode_name[] = { "off", "library only", "library and internet" };
+#define NART_MODES ((int)(sizeof art_mode_name / sizeof *art_mode_name))
 
 static const int band_opts[] = { 16, 24, 32, 48, 64, 96, 128 };
 static const int scroff_opts[] = { 0, 15, 30, 60, 120, 300, 600, 1800, 3600 };
@@ -2628,6 +2698,10 @@ static void opt_row(const struct ui *u, int id, char *l, size_t nl, char *v, siz
 	case OP_RIPFMT:
 		snprintf(l, nl, "CD rip format");
 		snprintf(v, nv, "%s", rip_fmt_name[u->rip_fmt]);
+		break;
+	case OP_ART:
+		snprintf(l, nl, "Artwork");
+		snprintf(v, nv, "%s", art_mode_name[u->art_mode]);
 		break;
 	default:
 		snprintf(l, nl, "Resume playback");
@@ -2786,6 +2860,10 @@ static void opt_activate(struct ui *u, int id)
 		u->rip_fmt = (u->rip_fmt + 1) % NRIP_FMT;
 		save_config_key("rip_format", rip_fmt_arg[u->rip_fmt]);
 		break;
+	case OP_ART:
+		u->art_mode = (u->art_mode + 1) % NART_MODES;
+		save_int_key("artwork", u->art_mode);
+		break;
 	default:
 		u->resume = !u->resume;
 		save_config_key("resume", u->resume ? "on" : "off");
@@ -2924,6 +3002,8 @@ static void render(struct ui *u)
 		const char *rows[VR_MAX], *vals[VR_MAX];
 		int ids[VR_MAX], n = visuals_rows(u, ids), i;
 
+		if (u->sel >= n && n > 0)   /* the list got shorter while it was open (a stream ended, a search became unavailable) */
+			u->sel = n - 1;
 		for (i = 0; i < n; i++) {
 			vals[i] = "";
 			switch (ids[i]) {
@@ -3063,7 +3143,7 @@ static void mpd_connect(struct ui *u)
 	long now = now_ms();
 	int r;
 
-	if (mpdc_is_open(&u->mpd) || now - u->last_try < MPD_RETRY_MS)
+	if (mpdc_is_open(&u->mpd) || ms_age(now, u->last_try) < MPD_RETRY_MS)
 		return;
 	u->last_try = now;
 	r = mpdc_open(&u->mpd, MPDC_DEFAULT_HOST, u->mpd_port);
@@ -3121,7 +3201,7 @@ static void *mpd_thread(void *arg)
 			u->p_refresh = 0;
 			last_song_t = 0;   /* read the song again whatever the position says */
 		}
-		if (st.song != last_pos || strcmp(st.state, last_state) || now - last_song_t >= 2000) {
+		if (st.song != last_pos || strcmp(st.state, last_state) || ms_age(now, last_song_t) >= 2000) {
 			struct mpdc_song n;
 
 			if (!strcmp(st.state, "stop") && st.song < 0) {
@@ -3220,7 +3300,7 @@ static void mpd_poll(struct ui *u)
 	}
 	changed_track = st.song != u->seen_pos || strcmp(st.state, u->seen_state) ||
 		       (u->have_song && sg.file[0] && strcmp(sg.file, u->song.file));   /* the queue was replaced under us: other file, same position, still playing */
-	if (changed_track && !was_playing && u->input == X45_IN_PCUSB && now - u->in_sw_t > 2000 &&
+	if (changed_track && !was_playing && u->input == X45_IN_PCUSB && ms_age(now, u->in_sw_t) > 2000 &&
 	    (!strcmp(st.state, "play") || (!strcmp(st.state, "pause") && !strncmp(st.error, "Failed to open", 14)))) {
 		/* a controller started MPD while the XMOS is on the computer's port: MPD finds no DAC (it pauses with an
 		 * error) and has already moved the clock line. The network input takes over and plays. */
@@ -3231,7 +3311,7 @@ static void mpd_poll(struct ui *u)
 		return;
 	}
 	if (changed_track && !was_playing && !strcmp(st.state, "play") && u->input != X45_IN_NETWORK &&
-	    u->input != UI_IN_CD && !u->air && now - u->in_sw_t > 6000 && now - u->start_t > 10000) {
+	    u->input != UI_IN_CD && !u->air && ms_age(now, u->in_sw_t) > 6000 && ms_age(now, u->start_t) > 10000) {
 		/* somebody started MPD (a UPnP/DLNA controller, the web page, a phone app) while another input
 		 * is selected: the music is on the network path, so the panel follows it */
 		input_select(u, X45_IN_NETWORK);
@@ -3249,7 +3329,7 @@ static void mpd_poll(struct ui *u)
 		u->last_song = now;
 		snprintf(u->seen_state, sizeof u->seen_state, "%s", st.state);
 	} else if (u->have_song && !strncmp(u->song.file, "http", 4) &&
-		   now - u->last_song >= 2000) {
+		   ms_age(now, u->last_song) >= 2000) {
 		/* a stream's title changes without the queue changing, and the stream
 		 * name only arrives once it is connected */
 		u->last_song = now;
@@ -3260,8 +3340,8 @@ static void mpd_poll(struct ui *u)
 	}
 
 	/* adopt MPD's volume unless the user just moved it ourselves */
-	if (st.volume >= 0 && st.volume != u->volume && !VOL_LOCKED(u) &&
-	    now - u->last_vol_change > VOL_ECHO_MS) {
+	if (st.volume >= 0 && st.volume != u->volume && !VOL_LOCKED(u) && !u->bt_swap && !bt_volume(u) &&
+	    ms_age(now, u->last_vol_change) > VOL_ECHO_MS && ms_age(now, u->vol_fade_t) > 4000) {   /* a fade lowers MPD's level, not the owner's */
 		u->volume = st.volume;
 		apply_balance(u, st.volume);   /* the master write of whoever moved it set both sides alike: the balance is put back */
 	}
@@ -3397,6 +3477,9 @@ static void rec_start(struct ui *u)
 	u->rec_secs = 0;
 	u->rec_track = 0;
 	u->rec_tracks = 0;
+	u->rec_bad = 0;
+	u->rec_msg[0] = '\0';
+	u->rec_dir[0] = '\0';
 	snprintf(u->rec_state, sizeof u->rec_state, "rec");
 	say(u, cd ? "ripping the disc to disk" : "recording %s to disk", name);
 	u->rec_note_t = now_ms();   /* and a large card for a few seconds: the line above is easy to miss */
@@ -3424,25 +3507,35 @@ static void rec_poll(struct ui *u)
 	if (waitpid(u->rec_pid, &st, WNOHANG) == u->rec_pid) {
 		u->rec_pid = 0;
 		f = fopen(REC_STATUS, "r");
-		/* a finished rip leaves state=done, a failure state=error + msg */
+		/* a finished rip leaves state=done (with a msg when sectors could not be read), a failure state=error + msg */
+		u->rec_msg[0] = '\0';
 		if (f) {
-			while (fgets(line, sizeof line, f))
-				if (!strncmp(line, "msg=", 4) && line[4] != '\n') {
-					line[strcspn(line, "\r\n")] = '\0';
-					say(u, "recording stopped: %s", line + 4);
-					fclose(f);
-					u->dirty = 1;
-					return;
-				}
+			char state[16] = "";
+
+			while (fgets(line, sizeof line, f)) {
+				line[strcspn(line, "\r\n")] = '\0';
+				if (!strncmp(line, "state=", 6)) snprintf(state, sizeof state, "%s", line + 6);
+				else if (!strncmp(line, "msg=", 4)) snprintf(u->rec_msg, sizeof u->rec_msg, "%s", line + 4);
+				else if (!strncmp(line, "bad=", 4)) u->rec_bad = atoi(line + 4);
+				else if (!strncmp(line, "dir=", 4)) snprintf(u->rec_dir, sizeof u->rec_dir, "%s", line + 4);
+			}
 			fclose(f);
+			if (!strcmp(state, "error") && u->rec_msg[0]) {
+				say(u, "recording stopped: %s", u->rec_msg);
+				u->dirty = 1;
+				return;
+			}
 		}
 		if (mpdc_is_open(&u->mpd))
 			mpdc_run(&u->mpd, "update", NULL, NULL, NULL, 0);
-		say(u, u->rec_cd ? "disc ripped" : "recording saved");
+		if (u->rec_cd && u->rec_msg[0])
+			say(u, "%s", u->rec_msg);
+		else
+			say(u, u->rec_cd ? "disc ripped" : "recording saved");
 		u->dirty = 1;
 		return;
 	}
-	if (now - u->rec_poll < 500)
+	if (ms_age(now, u->rec_poll) < 500)
 		return;
 	u->rec_poll = now;
 	f = fopen(REC_STATUS, "r");
@@ -3452,6 +3545,11 @@ static void rec_poll(struct ui *u)
 		if (!strncmp(line, "secs=", 5)) u->rec_secs = atol(line + 5);
 		else if (!strncmp(line, "track=", 6)) u->rec_track = atoi(line + 6);
 		else if (!strncmp(line, "tracks=", 7)) u->rec_tracks = atoi(line + 7);
+		else if (!strncmp(line, "bad=", 4)) u->rec_bad = atoi(line + 4);
+		else if (!strncmp(line, "dir=", 4)) {
+			line[strcspn(line, "\r\n")] = '\0';
+			snprintf(u->rec_dir, sizeof u->rec_dir, "%s", line + 4);
+		}
 	}
 	fclose(f);
 	u->dirty = 1;
@@ -3733,6 +3831,7 @@ static void bt_start(struct ui *u)
 
 	if (u->bt_pid > 0)
 		return;
+	ui_btout_release(u);   /* the Bluetooth output has the radio stick: the input takes it over */
 	unlink(BT_STATUS);
 	bt_forget_state(u);
 	u->bt_err[0] = '\0';
@@ -3849,7 +3948,7 @@ static void bt_poll(struct ui *u)
 {
 	long now = now_ms();
 
-	if (u->bt_pid <= 0 || now - u->bt_lastpoll < 250)
+	if (u->bt_pid <= 0 || ms_age(now, u->bt_lastpoll) < 250)
 		return;
 	u->bt_lastpoll = now;
 	if (waitpid(u->bt_pid, NULL, WNOHANG) == u->bt_pid) {
@@ -3922,8 +4021,9 @@ static void spec_poll(struct ui *u)
 	if (tuner_input(u)) {
 		mode = 1;
 		rate = 44100;
-	} else if (u->input == X45_IN_NETWORK && u->sp_fails >= 2) {
-		/* the SSI capture is dead: MPD can still hand its own samples to the analyzer (while it plays) */
+	} else if (u->input == X45_IN_NETWORK && (u->sp_fails >= 2 || ui_btout_routed())) {
+		/* the SSI capture is dead, or the sound goes to a Bluetooth device and never reaches the DAC: MPD can still hand
+		 * its own samples to the analyzer (while it plays) */
 		if (u->st.audio[0] >= '0' && u->st.audio[0] <= '9' && atoi(u->st.audio) >= 8000) {
 			mode = 2;
 			rate = (unsigned)atoi(u->st.audio);
@@ -4278,7 +4378,7 @@ static void tuner_poll(struct ui *u)
 	char line[200];
 	int up = 0;
 
-	if (u->tu_pid <= 0 || now - u->tu_lastpoll < 100)
+	if (u->tu_pid <= 0 || ms_age(now, u->tu_lastpoll) < 100)
 		return;
 	u->tu_lastpoll = now;
 	if (waitpid(u->tu_pid, NULL, WNOHANG) == u->tu_pid) {
@@ -4403,7 +4503,7 @@ static void tuner_step(struct ui *u, int d)
 static void fm_knob(struct ui *u, int ticks)
 {
 	static long last;
-	long now = now_ms(), dt = now - last;
+	long now = now_ms(), dt = ms_age(now, last);
 	int step = dt < 35 ? 100 : dt < 70 ? 50 : dt < 140 ? 20 : dt < 300 ? 10 : 5;
 
 	last = now;
@@ -4438,6 +4538,10 @@ static void go_network(struct ui *u)
 static int mpd_do(struct ui *u, const char *cmd)
 {
 	int r;
+
+	if (!strcmp(cmd, "stop") || !strcmp(cmd, "pause") || !strcmp(cmd, "pause 1") || !strncmp(cmd, "clear", 5) ||
+	    !strcmp(cmd, "next") || !strcmp(cmd, "previous"))
+		u->sw_want = 0;   /* the owner ends the stream watch (stream_watch) */
 
 	if (tuner_input(u)) {
 		/* the radio owns the transport: next/previous move along the stations,
@@ -4568,6 +4672,84 @@ static int mpd_do(struct ui *u, const char *cmd)
 	return r;
 }
 
+/* MPD's HTTP input has no timeout. When the connection to a radio station dies without being closed (the internet
+ * drops, the router goes), MPD stays in "play" for ever: the timer is frozen, the output writes silence ("Decoder is too
+ * slow"), pause does nothing and nothing tries again. This watches the elapsed time of a live stream and starts the
+ * station again, with longer pauses between the tries, until it plays; a stream that ended in an error is started again
+ * the same way. A stop or pause by the owner ends the watch. */
+#define STALL_MS 12000          /* "playing", but the elapsed time has not moved for this long */
+#define STALL_START_MS 25000    /* the same for a stream that has not yet delivered its first second */
+
+static void stream_watch(struct ui *u)
+{
+	static const int pause_ms[] = { 0, 4000, 8000, 15000, 30000 };
+	const struct mpdc_status *st = &u->st;
+	long now = now_ms();
+	int playing = !strcmp(st->state, "play"), idx;
+	char q[600], cmd[640];
+
+	if (u->input != X45_IN_NETWORK) {
+		u->sw_want = 0;
+		return;
+	}
+	if (playing) {
+		long limit;
+
+		if (!(u->have_song && !strncmp(u->song.file, "http", 4) && st->duration <= 0)) {
+			u->sw_want = 0;   /* a file, or a stream of known length (a UPnP server): not watched */
+			return;
+		}
+		if (!u->sw_want || strcmp(u->sw_url, u->song.file) || fabs(st->elapsed - u->sw_el) > 0.3) {
+			if (!u->sw_want || strcmp(u->sw_url, u->song.file)) {
+				u->sw_tries = 0;
+				snprintf(u->sw_url, sizeof u->sw_url, "%s", u->song.file);
+			} else if (st->elapsed > 20.0) {
+				u->sw_tries = 0;   /* it has played for a while again */
+			}
+			u->sw_want = 1;
+			u->sw_el = st->elapsed;
+			u->sw_t = now;
+			return;
+		}
+		limit = st->elapsed < 1.0 ? STALL_START_MS : STALL_MS;
+		if (ms_age(now, u->sw_t) < limit)
+			return;
+	} else {
+		if (!u->sw_want)
+			return;
+		if (ms_age(now, u->sw_retry_t) < 3000)
+			return;   /* our own restart passes through "stop" */
+		if (!st->error[0]) {
+			u->sw_want = 0;   /* paused or stopped, and no error: the owner did it */
+			return;
+		}
+	}
+	idx = u->sw_tries < (int)(sizeof pause_ms / sizeof *pause_ms) ? u->sw_tries : (int)(sizeof pause_ms / sizeof *pause_ms) - 1;
+	if (ms_age(now, u->sw_retry_t) < pause_ms[idx] || !mpdc_is_open(&u->mpd) || !u->sw_url[0])
+		return;
+	if (u->sw_tries >= 30) {   /* about 15 minutes of tries: the station is gone, stop knocking */
+		u->sw_want = 0;
+		say(u, "Stream lost");
+		fprintf(stderr, "x45ui: stream %.100s did not come back, giving up\n", u->sw_url);
+		return;
+	}
+	u->sw_tries++;
+	u->sw_retry_t = now;
+	u->sw_t = now;
+	u->sw_el = -1.0;
+	fprintf(stderr, "x45ui: stream lost (%s), starting %.100s again (try %d)\n", playing ? "no data" : st->error, u->sw_url, u->sw_tries);
+	say(u, "Stream lost - reconnecting");
+	if (mpdc_quote(q, sizeof q, u->sw_url) < 0)
+		return;
+	snprintf(cmd, sizeof cmd, "add %s", q);
+	dac_settle(u);   /* the output opens again: silent until the stream is up */
+	mpdc_run(&u->mpd, "clearerror", NULL, NULL, NULL, 0);
+	if (mpdc_run(&u->mpd, "clear", NULL, NULL, NULL, 0) == 0 && mpdc_run(&u->mpd, cmd, NULL, NULL, NULL, 0) == 0)
+		mpdc_run(&u->mpd, "play", NULL, NULL, NULL, 0);   /* MPD that does not answer is left alone until the next try */
+	u->p_refresh = 1;
+	u->last_poll = 0;
+}
+
 static void mpd_toggle(struct ui *u)
 {
 	if (tuner_input(u)) {
@@ -4645,6 +4827,14 @@ static void apply_volume(struct ui *u)
 		u->volume = 0;
 	if (u->volume > 100)
 		u->volume = 100;
+	if (u->bt_swap) {   /* the headset's level: it goes to the headset, never to the speakers' mixer */
+		u->bt_vol = u->volume;
+		u->last_vol_change = now_ms();
+		u->vol_dirty = 1;
+		ui_btout_set_volume(u->volume);
+		u->dirty = 1;
+		return;
+	}
 	out = VOL_LOCKED(u) ? 100 : u->volume;
 	if (!VOL_LOCKED(u)) {
 		u->last_vol_change = now_ms();
@@ -4658,6 +4848,26 @@ static void apply_volume(struct ui *u)
 		x45_volume(u->x45fd, out);
 	apply_balance(u, out);
 	u->dirty = 1;
+}
+
+#define BT_VOL_DEFAULT 25   /* a headset that was never set: a modest level, not what its own keys were left at */
+
+/* The knob moves the headset's level while the sound goes there, the speakers' level while it does not. The two are
+ * kept apart: `volume` is whichever the knob moves now, the other one waits (bt_spk / bt_vol). */
+static void bt_vol_swap(struct ui *u, int to_bt)
+{
+	if (to_bt && !u->bt_swap) {
+		u->bt_spk = u->volume;
+		u->volume = u->bt_vol >= 0 ? u->bt_vol : BT_VOL_DEFAULT;
+		u->bt_swap = 1;
+		if (mpdc_is_open(&u->mpd))   /* MPD's own mixer of the output stays out of it: the headset's level is the only one */
+			mpdc_cmd(&u->mpd, "setvol 100");
+	} else if (!to_bt && u->bt_swap) {
+		u->bt_vol = u->volume;
+		u->volume = u->bt_spk > 0 ? u->bt_spk : u->volume;
+		u->bt_swap = 0;
+	}
+	apply_volume(u);
 }
 
 int ui_volume_locked(const struct ui *u)
@@ -4946,8 +5156,11 @@ static int fav_list(struct ui *u, struct mpdc_entry **out, int router)
 	return fav_scan(u, out, router, BROWSE_MAX);
 }
 
+#define RB_PAGE 200   /* stations per page of x45rb; "Load more" appends the next one */
+static int rb_page_off;   /* where the next page of the station list on show starts */
+
 /* The community radio directory: "@r|<command>[|<argument>]" runs x45rb, whose lines become rows. */
-static int rb_list(struct ui *u, const char *want, struct mpdc_entry **out)
+static int rb_list(struct ui *u, const char *want, struct mpdc_entry **out, int off)
 {
 	char cmd[700], arg1[160] = "", arg2[160] = "", qa[400], line[1200];
 	const char *p = want + 3, *bar;
@@ -4970,7 +5183,10 @@ static int rb_list(struct ui *u, const char *want, struct mpdc_entry **out)
 
 		if (shq(qc, sizeof qc, arg1) < 0)
 			return -EINVAL;
-		snprintf(cmd, sizeof cmd, X45RB " %s %s 2>/dev/null", qc, arg2[0] ? qa : "");
+		if (off > 0)   /* a later page of a station list: the argument slot is filled (empty for the top and trending lists) */
+			snprintf(cmd, sizeof cmd, X45RB " %s %s %d 2>/dev/null", qc, arg2[0] ? qa : "''", off);
+		else
+			snprintf(cmd, sizeof cmd, X45RB " %s %s 2>/dev/null", qc, arg2[0] ? qa : "");
 	}
 	rows = calloc(BROWSE_MAX, sizeof *rows);
 	if (!rows)
@@ -5104,8 +5320,10 @@ static void browse_load(struct ui *u, const char *path, const char *select_path)
 
 	u->dir_err[0] = '\0';
 	if (want[0] == '@') {
+		if (!strncmp(want, "@r|", 3))
+			rb_page_off = RB_PAGE;
 		n = !strcmp(want, "@fav") ? fav_list(u, &rows, 0) : !strcmp(want, "@rt") ? fav_list(u, &rows, 1) :
-		    !strncmp(want, "@r|", 3) ? rb_list(u, want, &rows) : net_list(u, want, &rows);   /* each explains itself in dir_err when it fails */
+		    !strncmp(want, "@r|", 3) ? rb_list(u, want, &rows, 0) : net_list(u, want, &rows);   /* each explains itself in dir_err when it fails */
 		if (!strncmp(want, "@u|", 3))
 			trunc = u->net_more;   /* "First 256 shown" */
 		if (n > 0 && !strcmp(want, "@net")) {
@@ -5378,6 +5596,53 @@ static void browse_play(struct ui *u)
 	}
 }
 
+/* "Load more" at the end of a station list of the radio directory: the next page is added to the rows on show, the
+ * cursor stays where the new rows begin. */
+static void browse_more(struct ui *u)
+{
+	struct mpdc_entry *add = NULL, *all;
+	int na, keep = 0, at = -1, i;
+
+	if (strncmp(u->dir, "@r|", 3))
+		return;
+	u->dir_err[0] = '\0';
+	na = rb_list(u, u->dir, &add, rb_page_off);
+	if (na < 0 || u->dir_err[0]) {
+		u->dir_err[0] = '\0';
+		say(u, "the radio directory did not answer");
+		return;
+	}
+	all = calloc((size_t)(u->nrows + na + 2), sizeof *all);
+	if (!all) {
+		free(add);
+		return;
+	}
+	for (i = 0; i < u->nrows; i++) {
+		if (!strcmp(u->rows[i].path, "@more")) {
+			at = keep;
+			continue;
+		}
+		if (!strcmp(u->rows[i].path, "@search"))
+			continue;
+		all[keep++] = u->rows[i];
+	}
+	for (i = 0; i < na; i++)
+		all[keep++] = add[i];
+	memset(&all[keep], 0, sizeof all[keep]);   /* "Search stations" stays the last row */
+	all[keep].is_dir = 1;
+	snprintf(all[keep].path, sizeof all[keep].path, "@search");
+	snprintf(all[keep].name, sizeof all[keep].name, "Search stations");
+	keep++;
+	free(add);
+	free(u->rows);
+	u->rows = all;
+	u->nrows = keep;
+	rb_page_off += RB_PAGE;
+	if (at >= 0)
+		u->bsel = at;
+	u->dirty = 1;
+}
+
 static void browse_enter(struct ui *u)
 {
 	if (u->bsel < 0 || u->bsel >= u->nrows)
@@ -5402,6 +5667,10 @@ static void browse_enter(struct ui *u)
 			ui_ext_open_name(u, "search");
 			return;
 		}
+		if (!strcmp(path, "@more")) {
+			browse_more(u);
+			return;
+		}
 		if (!strcmp(path, "@refresh")) {   /* look for the servers again, and stay on that list */
 			u->net_force = 1;
 			browse_load(u, "@net", NULL);
@@ -5424,10 +5693,16 @@ static void browse_enter(struct ui *u)
 }
 
 /* Replace the queue with one stream and play it. */
-static void radio_play(struct ui *u, const char *url, const char *name)
+static void radio_play(struct ui *u, const char *url_in, const char *name_in)
 {
 	char q[600], cmd[640];
+	char url_c[MPDC_PATH_MAX], name_c[128];
+	const char *url = url_c, *name = name_c;
 
+	/* the caller may hand over u->last_url and u->last_name themselves (resuming the last station): a copy onto the
+	 * same buffer empties it with musl's snprintf, so everything below works on private copies */
+	snprintf(url_c, sizeof url_c, "%s", url_in);
+	snprintf(name_c, sizeof name_c, "%s", name_in);
 	if (mpdc_quote(q, sizeof q, url) < 0) {
 		say(u, "cannot use that station URL");
 		return;
@@ -5686,7 +5961,7 @@ static void skip_track(struct ui *u, int dir)
 	if (u->input == X45_IN_NETWORK && u->have_song && !strncmp(u->song.file, "http", 4) && u->ctx && u->ctx_n > 1) {
 		int i, cur = -1;
 
-		if (now - last < 250)
+		if (ms_age(now, last) < 250)
 			return;
 		for (i = 0; i < u->ctx_n; i++)
 			if (!strcmp(u->ctx[i].url, u->song.file))
@@ -5703,7 +5978,7 @@ static void skip_track(struct ui *u, int dir)
 	    u->st.length <= 1) {
 		int i, cur = -1;
 
-		if (now - last < 250)
+		if (ms_age(now, last) < 250)
 			return;
 		last = now;
 		radio_load(u);
@@ -5744,11 +6019,22 @@ void save_config_key(const char *key, const char *val)
 	char line[1100], tmp[] = CONF_PATH ".tmp";
 	size_t n = 0, kl = strlen(key);
 	int done = 0, w;
-	FILE *f = fopen(CONF_PATH, "r");
+	FILE *f;
 
 	/* a value that does not fit a line would lose its newline and run into the next setting */
 	if (strlen(key) + strlen(val) + 4 > sizeof line)
 		return;
+	if (val[strcspn(val, "\r\n")]) {   /* a line break would start another setting */
+		char *cut = strdup(val);
+
+		if (!cut)
+			return;
+		cut[strcspn(cut, "\r\n")] = '\0';
+		save_config_key(key, cut);
+		free(cut);
+		return;
+	}
+	f = fopen(CONF_PATH, "r");
 	if (f) {
 		while (fgets(line, sizeof line, f)) {
 			const char *k = line;
@@ -5776,8 +6062,10 @@ void save_config_key(const char *key, const char *val)
 	if (!done) {
 		w = snprintf(line, sizeof line, "%s = %s\n", key, val);
 
-		if (n + (size_t)w >= sizeof buf)
+		if (n + (size_t)w + 1 >= sizeof buf)
 			return;
+		if (n && buf[n - 1] != '\n')   /* a file that ends without a newline: the setting would join its last line */
+			buf[n++] = '\n';
 		memcpy(buf + n, line, (size_t)w);
 		n += (size_t)w;
 	}
@@ -5905,6 +6193,11 @@ static void load_config(struct ui *u, const char *path)
 			for (n = 0; n < NRIP_FMT; n++)
 				if (!strncmp(v, rip_fmt_arg[n], strlen(rip_fmt_arg[n])) && (v[strlen(rip_fmt_arg[n])] == '\0' || v[strlen(rip_fmt_arg[n])] == '\n'))
 					u->rip_fmt = n;
+		} else if (!strcmp(k, "artwork")) {
+			int n = atoi(v);
+
+			if (n >= 0 && n < NART_MODES)
+				u->art_mode = n;
 		} else if (!strcmp(k, "resume")) {
 			u->resume = strncmp(v, "off", 3) != 0 && *v != '0';
 		} else if (!strcmp(k, "last_radio_url")) {
@@ -5942,6 +6235,11 @@ static void load_config(struct ui *u, const char *path)
 
 			if (n >= 1 && n <= 100)
 				u->cfg_vol = n;
+		} else if (!strcmp(k, "btout_volume")) {
+			int n = atoi(v);
+
+			if (n >= 0 && n <= 100)
+				u->bt_vol = n;
 		} else if (!strcmp(k, "balance")) {
 			int n = atoi(v);
 
@@ -6003,18 +6301,19 @@ static void headphone_edge(struct ui *u, int prev)
 	x45_out_headphone(u->x45fd, present);
 	x45_outputs_apply(u->x45fd);
 	if (present) {
-		if (u->volume > HP_VOLUME) {
+		if (u->volume > HP_VOLUME && !u->bt_swap) {
 			u->spk_volume = u->volume;
 			u->volume = HP_VOLUME;
 			apply_volume(u);
 		}
 		say(u, "headphones on, volume %d", HP_VOLUME);
 	} else {
-		if (u->spk_volume > 0) {
+		if (u->spk_volume > 0 && !u->bt_swap) {
 			u->volume = u->spk_volume;
 			apply_volume(u);
 		}
-		u->spk_volume = 0;
+		if (!u->bt_swap)
+			u->spk_volume = 0;
 		say(u, "headphones off");
 	}
 }
@@ -6225,8 +6524,9 @@ static void visuals_open(struct ui *u)
 static void station_save(struct ui *u)
 {
 	const char *name = u->song.name[0] ? u->song.name : u->song.title[0] ? u->song.title : "Stream";
-	char clean[136];
+	char clean[136], *shown;
 	FILE *f;
+	struct stat sb;
 	int i;
 
 	radio_load(u);
@@ -6242,6 +6542,15 @@ static void station_save(struct ui *u)
 	for (i = 0; clean[i]; i++)
 		if (clean[i] == '|' || clean[i] == '\n' || clean[i] == '\r')
 			clean[i] = ' ';
+	if (stat(u->stations_path, &sb) == 0 && sb.st_size > 200 * 1024) {   /* the list is not read above 256 KB at all */
+		say(u, "the station list is full");
+		return;
+	}
+	shown = clean;
+	while (*shown == ' ' || *shown == '#')   /* a line that starts with '#' is a comment: the station would vanish */
+		shown++;
+	if (!*shown)
+		shown = "Stream";
 	f = fopen(u->stations_path, "a+");
 	if (!f) {
 		say(u, "cannot write the station list");
@@ -6254,10 +6563,10 @@ static void station_save(struct ui *u)
 		if (last != '\n')
 			fputc('\n', f);
 	}
-	fprintf(f, "%s | %s\n", clean, u->song.file);
+	fprintf(f, "%s | %s\n", shown, u->song.file);
 	fclose(f);
 	radio_load(u);
-	say(u, "saved: %s", clean);
+	say(u, "saved: %s", shown);
 }
 
 /* ---- a yes/no question: before a station scan replaces the list, and before something is deleted ---- */
@@ -6412,7 +6721,15 @@ static int lib_delete(const char *rel, const char **why)
 		*why = "busy with another change";
 		return -1;
 	}
-	hold = open("/tmp/x45media.hold", O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+	hold = open("/tmp/x45media.hold", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	if (hold >= 0) {   /* the pid of the holder: x45media does not believe a marker whose process is gone */
+		char pb[16];
+		int pn = snprintf(pb, sizeof pb, "%d\n", (int)getpid());
+
+		if (write(hold, pb, (size_t)pn) < 0) {
+			/* an empty marker still holds */
+		}
+	}
 	r = lib_delete_do(rel, why);
 	if (hold >= 0) {
 		close(hold);
@@ -6448,10 +6765,24 @@ static int lib_delete_do(const char *rel, const char **why)
 		*why = "that is a library root";
 		return -1;
 	}
+	{
+		/* a link on a foreign disk can point anywhere (at the unit's own files): only what lies below the library
+		 * folder of the disk is deleted */
+		size_t bl = strlen(base);
+
+		if (strncmp(real, base, bl) || real[bl] != '/') {
+			*why = "that is outside the disk";
+			return -1;
+		}
+	}
 	root[0] = '\0';
 	rw = mount_rw(real, root, sizeof root);
 	if (!root[0]) {
 		*why = "that is not a disk";
+		return -1;
+	}
+	if (strncmp(mount_dev, "/dev/sd", 7) != 0) {   /* the library holds attached disks, never the unit's own storage */
+		*why = "that is not an attached disk";
 		return -1;
 	}
 	if (!strcmp(root, real)) {
@@ -7123,7 +7454,7 @@ static int list_key_ok(struct ui *u, const struct x45_event *ev)
 		return !u->ir_bounce;
 	if (u->screen == SCR_INPUTS || ev->code != u->ir_code)
 		return 0;
-	if (now - u->ir_down < LIST_HOLD_MS || now - u->ir_step < LIST_REPEAT_MS)
+	if (ms_age(now, u->ir_down) < LIST_HOLD_MS || ms_age(now, u->ir_step) < LIST_REPEAT_MS)
 		return 0;
 	u->ir_step = now;
 	return 1;
@@ -7232,6 +7563,26 @@ static void handle_ir(struct ui *u, const struct x45_event *ev)
 	case IR_BALANCE:   /* the balance control; the same key on it closes it again (ext/balance.c) */
 		if (u->screen != SCR_EXT && !u->ir_bounce)
 			ui_ext_open_name(u, "balance");
+		break;
+	case IR_CLOCK:     /* the clock; pressed on it, the screen goes dark (ext/clock.c) */
+		if (!u->ir_bounce)
+			ui_ext_open_name(u, "clock");
+		break;
+	case IR_SLEEP:     /* the sleep timer (ext/clock.c: the same key on it steps to the next time) */
+		if (!u->ir_bounce)
+			ui_ext_open_name(u, "sleep");
+		break;
+	case IR_RED:       /* a star on the song that is on air (ext/songlog.c) */
+		if (!u->ir_bounce)
+			ui_songlog_mark_now(u);
+		break;
+	case IR_YELLOW:    /* the song log */
+		if (!u->ir_bounce)
+			ui_ext_open_name(u, "songlog");
+		break;
+	case IR_BLUE:      /* the signal path */
+		if (!u->ir_bounce)
+			ui_ext_open_name(u, "path");
 		break;
 	case IR_UP:
 	case IR_DOWN:
@@ -7406,7 +7757,7 @@ static void input_auto_poll(struct ui *u)
 		input_select(u, in_at(u->sel));
 		return;
 	}
-	if (now - last_draw >= 60) {         /* animate the countdown strip */
+	if (ms_age(now, last_draw) >= 60) {         /* animate the countdown strip */
 		last_draw = now;
 		u->dirty = 1;
 	}
@@ -7436,6 +7787,77 @@ static void cd_eject(struct ui *u)
 	u->dirty = 1;
 }
 
+/* ---- services for ext/clock.c ---- */
+void ui_screen_dark(struct ui *u)
+{
+	if (u->scr_dark)
+		return;
+	if (u->bright < 2)
+		u->bright = bl_get() >= 2 ? bl_get() : 2;
+	u->scr_dark = 1;
+	bl_raw(1);
+}
+
+void ui_set_mute(struct ui *u, int on)
+{
+	set_mute(u, on);
+}
+
+void ui_stop_playing(struct ui *u)
+{
+	if (cd_active(u))
+		cd_stop(u);
+	if (mpdc_is_open(&u->mpd))
+		mpd_do(u, "stop");
+}
+
+void ui_power_off(struct ui *u)
+{
+	power_log("timer", "sleep timer: shutting down", 0);
+	sync();
+	u->quit_code = 3;
+	stop_now = 1;
+}
+
+/* A fade is the output level only: u->volume, and so the saved volume, stay the owner's. */
+int ui_level_scale(struct ui *u, int pct)
+{
+	char cmd[24];
+	int out, sent = 0;
+
+	if (pct < 0)
+		pct = 0;
+	if (pct > 100)
+		pct = 100;
+	u->vol_fade_t = now_ms();
+	if (u->bt_swap) {   /* the headset's level */
+		ui_btout_set_volume(u->volume * pct / 100);
+		return 1;
+	}
+	if (VOL_LOCKED(u))
+		return 0;
+	out = u->volume * pct / 100;
+	if (mpdc_is_open(&u->mpd)) {
+		snprintf(cmd, sizeof cmd, "setvol %d", out);
+		sent = mpdc_run(&u->mpd, cmd, NULL, NULL, NULL, 0) == 0;
+	}
+	if (!sent && u->x45fd >= 0)
+		x45_volume(u->x45fd, out);
+	apply_balance(u, out);
+	return 1;
+}
+
+void ui_level_restore(struct ui *u)
+{
+	u->vol_fade_t = now_ms();   /* the next looks at MPD may still show a faded level */
+	apply_volume(u);
+}
+
+const char *ui_input_label(const struct ui *u)
+{
+	return in_label(u->input);
+}
+
 /* a short press of STOP */
 static void stop_press(struct ui *u)
 {
@@ -7450,7 +7872,10 @@ static void stop_press(struct ui *u)
 static void handle(struct ui *u, const struct x45_event *ev)
 {
 	wake(u);
+	u->touch_t = now_ms();
 	u->resume_name[0] = '\0';   /* the owner is doing something: no surprise station */
+	if (ui_ext_filter(u, ev))   /* the child lock (ext/childlock.c) */
+		return;
 	if (ev->kind == X45_EV_ENCODER) {
 		if (ev->code == X45_KNOB_VOLUME) {
 			if (!VOL_LOCKED(u)) {
@@ -7475,7 +7900,7 @@ static void handle(struct ui *u, const struct x45_event *ev)
 			long now = now_ms();
 
 			/* the same button again within LIST_BOUNCE_MS is a bounce for the list keys; the hold clock keeps the first press */
-			u->ir_bounce = ev->code == u->ir_code && now - u->ir_down < LIST_BOUNCE_MS;
+			u->ir_bounce = ev->code == u->ir_code && ms_age(now, u->ir_down) < LIST_BOUNCE_MS;
 			if (!u->ir_bounce) {
 				u->ir_code = ev->code;
 				u->ir_down = now;
@@ -7613,8 +8038,10 @@ static void web_command(struct ui *u, char *line)
 	line[strcspn(line, "\r\n")] = '\0';
 	if (sscanf(line, "%23s %1099[^\n]", a, b) < 1)
 		return;
-	if (strcmp(a, "lib") || (strncmp(b, "update", 6) && strncmp(b, "gone", 4)))   /* what the web file manager reports after a change is nobody's touch */
+	if (strcmp(a, "lib") || (strncmp(b, "update", 6) && strncmp(b, "gone", 4))) {   /* what the web file manager reports after a change is nobody's touch */
 		wake(u);
+		u->touch_t = now_ms();
+	}
 	n = atoi(b);
 	if (!strcmp(a, "key")) {
 		static const struct { const char *n; int c; } k[] = {
@@ -7648,7 +8075,7 @@ static void web_command(struct ui *u, char *line)
 			{ "play", IR_PLAYPAUSE }, { "stop", IR_STOP }, { "volup", IR_VOLUP }, { "voldown", IR_VOLDOWN },
 			{ "nowplaying", IR_NOWPLAY }, { "favourite", IR_FAVOURITE }, { "bookmark", IR_BOOKMARK }, { "eject", IR_EJECT },
 			{ "iservice", IR_ISERVICE }, { "search", IR_SEARCH }, { "backspace", IR_BKSP }, { "capnum", 373 },
-			{ "balance", IR_BALANCE },
+			{ "balance", IR_BALANCE }, { "clock", IR_CLOCK }, { "sleep", IR_SLEEP }, { "red", IR_RED }, { "yellow", IR_YELLOW }, { "blue", IR_BLUE },
 			{ "0", IR_NUM0 }, { "1", IR_NUM0 + 1 }, { "2", IR_NUM0 + 2 }, { "3", IR_NUM0 + 3 }, { "4", IR_NUM0 + 4 },
 			{ "5", IR_NUM0 + 5 }, { "6", IR_NUM0 + 6 }, { "7", IR_NUM0 + 7 }, { "8", IR_NUM0 + 8 }, { "9", IR_NUM0 + 9 },
 		};
@@ -7661,8 +8088,13 @@ static void web_command(struct ui *u, char *line)
 		char w[12] = "";
 		int t = 0;
 
-		if (sscanf(b, "%11s %d", w, &t) == 2 && t)
+		if (sscanf(b, "%11s %d", w, &t) == 2 && t) {
+			if (t < -50)   /* the real knob and the remote give a few ticks; the sums below must not wrap */
+				t = -50;
+			if (t > 50)
+				t = 50;
 			web_event(u, X45_EV_ENCODER, !strcmp(w, "vol") ? X45_KNOB_VOLUME : X45_KNOB_SCROLL, t);
+		}
 	} else if (!strcmp(a, "screen")) {
 		/* not the question (SCR_CONFIRM): it would come up with the answer "yes" over whatever it asked last */
 		if (n >= 0 && n < SCR_COUNT && n != SCR_EXT && n != SCR_CONFIRM)
@@ -7811,6 +8243,12 @@ static void web_command(struct ui *u, char *line)
 				save_config_key("rip_format", rip_fmt_arg[i]);
 				u->dirty = 1;
 			}
+	} else if (!strcmp(a, "artwork")) {   /* 0 off, 1 library only, 2 also the internet; kept */
+		if (n >= 0 && n < NART_MODES) {
+			u->art_mode = n;
+			save_int_key("artwork", n);
+			u->dirty = 1;
+		}
 	} else if (!strcmp(a, "mpd")) {
 		static const char *const ok[] = {
 			"play", "pause", "stop", "next", "previous", "random 0", "random 1",
@@ -7831,11 +8269,15 @@ static void web_command(struct ui *u, char *line)
 		else if (sscanf(b, "deleteid %d", &pos) == 1 || sscanf(b, "delete %d", &pos) == 1)
 			mpd_do(u, b);
 	} else if (!strcmp(a, "lib")) {
-		char verb[12] = "", path[236] = "", q[300], cmd[340];
+		char verb[12] = "", path[MPDC_PATH_MAX] = "", q[2 * MPDC_PATH_MAX + 4], cmd[2 * MPDC_PATH_MAX + 16];
 
-		if (sscanf(b, "%11s %235[^\n]", verb, path) >= 1) {
-			if (path_has_dotdot(path) || strlen(path) >= sizeof path - 1)
-				return;   /* (a path that filled the buffer was cut short: it would name another folder) */
+		if (sscanf(b, "%11s %511[^\n]", verb, path) >= 1) {
+			if (path_has_dotdot(path))
+				return;
+			if (strlen(path) >= sizeof path - 1) {
+				say(u, "path too long");   /* (a path that filled the buffer was cut short: it would name another folder) */
+				return;
+			}
 			mpd_quote(q, sizeof q, path);
 			if (!strcmp(verb, "update")) {
 				snprintf(cmd, sizeof cmd, "update %s", path[0] ? q : "");
@@ -7888,7 +8330,7 @@ static void web_command(struct ui *u, char *line)
 			{
 				char *s = name, *e;
 
-				while (*s == ' ')
+				while (*s == ' ' || *s == '#')   /* '#' first makes the line a comment in the station file */
 					s++;
 				memmove(name, s, strlen(s) + 1);
 				e = name + strlen(name);
@@ -7908,9 +8350,26 @@ static void web_command(struct ui *u, char *line)
 			if (url[i] || (strncmp(url, "http://", 7) && strncmp(url, "https://", 8)) || !name[0]) {
 				say(u, "Radio: bad name or address");
 			} else if (!strcmp(verb, "add")) {
-				FILE *sf = fopen(u->stations_path, "a");
+				FILE *sf;
+				struct stat sb;
+				int dup = 0;
 
-				if (sf) {
+				radio_load(u);
+				for (i = 0; i < (size_t)u->nstations; i++)
+					if (!strcmp(u->stations[i].url, url))
+						dup = 1;
+				if (dup) {
+					say(u, "already in the station list");
+				} else if (stat(u->stations_path, &sb) == 0 && sb.st_size > 200 * 1024) {
+					say(u, "the station list is full");   /* it is not read above 256 KB: everything would vanish */
+				} else if ((sf = fopen(u->stations_path, "a+"))) {
+					if (fseek(sf, -1, SEEK_END) == 0) {   /* a hand-edited file may end without a newline */
+						int last = fgetc(sf);
+
+						fseek(sf, 0, SEEK_END);
+						if (last != '\n')
+							fputc('\n', sf);
+					}
 					fprintf(sf, "%s | %s\n", name, url);
 					fclose(sf);
 					radio_load(u);
@@ -7936,6 +8395,8 @@ static void web_command(struct ui *u, char *line)
 			else if (!strcmp(b, "no"))
 				bt_cmd(u, 'n');
 		}
+	} else if (!strcmp(a, "btout")) {
+		ui_btout_web(u, b);
 	} else if (!strcmp(a, "cd")) {
 		if (!strcmp(b, "eject") && u->input == UI_IN_CD) {
 			cd_stop(u);
@@ -7943,6 +8404,8 @@ static void web_command(struct ui *u, char *line)
 				say(u, "disc ejected");
 			u->cd_ntracks = 0;
 		}
+	} else {
+		ui_ext_cmd(u, a, b);   /* a screen of ext/ that is called by that name (clock, songlog ...) */
 	}
 	u->dirty = 1;
 }
@@ -7964,9 +8427,9 @@ static void web_poll(struct ui *u)
 		unlink(WEB_CMD ".run");
 		last_state = 0;
 	}
-	if (!u->dirty && now - last_state < 1000)
+	if (!u->dirty && ms_age(now, last_state) < 1000)
 		return;
-	if (now - last_state < 250)
+	if (ms_age(now, last_state) < 250)
 		return;
 	last_state = now;
 
@@ -7983,7 +8446,7 @@ static void web_poll(struct ui *u)
 		fprintf(f, "{\"screen\":%d,\"screen_name\":\"%s\",\"input\":%d,\"input_name\":\"%s\","
 			"\"volume\":%d,\"balance\":%d,\"balance_max\":%d,\"muted\":%d,\"volume_hidden\":%d,\"status\":", u->screen, scr[u->screen], u->input,
 			inputs[u->input >= 0 && u->input < NUM_INPUTS ? u->input : 0], u->volume, u->balance, X45_BALANCE_MAX, u->muted,
-			u->vol_fixed && !u->hp_present);
+			u->vol_fixed && !u->hp_present && !bt_volume(u));
 		jstr(f, u->status);
 		fprintf(f, ",\"brightness\":%d,\"brightness_max\":%d,\"air\":%d", bl_get(), bl_max(), u->air);
 		fprintf(f, ",\"meter\":{\"source\":\"%s\",\"rate\":%u,\"why\":", meter_wanted(u) ? "capture" :
@@ -7998,7 +8461,11 @@ static void web_poll(struct ui *u)
 			u->trim[X45_IN_AUXIN] - 12, u->trim[X45_IN_PHONO] - 12, rip_fmt_arg[u->rip_fmt]);
 		for (int k = 0; k < NRIP_FMT; k++)
 			fprintf(f, "%s{\"name\":\"%s\",\"label\":\"%s\"}", k ? "," : "", rip_fmt_arg[k], rip_fmt_name[k]);
+		fprintf(f, "],\"artwork\":%d,\"artwork_modes\":[", u->art_mode);
+		for (int k = 0; k < NART_MODES; k++)
+			fprintf(f, "%s\"%s\"", k ? "," : "", art_mode_name[k]);
 		fputs("]}", f);
+		fprintf(f, ",\"art\":%d", u->art.px ? u->art_serial : 0);   /* the picture of what plays: /api/art?N */
 		fprintf(f, ",\"look\":{\"skin\":\"%s\",\"skins\":[", skin_at(u->skin_id)->name);
 		for (int k = 0; k < skin_count(); k++)
 			fprintf(f, "%s{\"name\":\"%s\",\"label\":\"%s\",\"about\":\"%s\"}", k ? "," : "", skin_at(k)->name, skin_at(k)->label,
@@ -8050,8 +8517,11 @@ static void web_poll(struct ui *u)
 		fputs(",\"file\":", f); jstr(f, u->have_song ? u->song.file : "");
 		fputs(",\"error\":", f); jstr(f, u->st.error);
 		fputs("}", f);
-		fprintf(f, ",\"rec\":{\"active\":%d,\"cd\":%d,\"secs\":%ld,\"track\":%d,\"tracks\":%d}",
-			u->rec_pid > 0, u->rec_cd, u->rec_secs, u->rec_track, u->rec_tracks);
+		fprintf(f, ",\"rec\":{\"active\":%d,\"cd\":%d,\"secs\":%ld,\"track\":%d,\"tracks\":%d,\"bad\":%d,\"dir\":",
+			u->rec_pid > 0, u->rec_cd, u->rec_secs, u->rec_track, u->rec_tracks, u->rec_bad);
+		jstr(f, u->rec_dir);
+		fputs(",\"msg\":", f); jstr(f, u->rec_msg);
+		fputc('}', f);
 		fprintf(f, ",\"cd\":{\"active\":%d,\"playing\":%d,\"track\":%d,\"pos\":%d,\"len\":%d,\"sel\":%d,"
 			"\"hdcd\":%d,\"hdcd_pe\":%d,\"hdcd_gain\":%d,\"album\":",
 			u->cd_pid > 0, u->cd_playing, u->cd_track, u->cd_pos, u->cd_tlen, u->cd_sel,
@@ -8097,7 +8567,10 @@ static void web_poll(struct ui *u)
 		fputs(",\"artist\":", f); jstr(f, u->bt_artist);
 		fputs(",\"album\":", f); jstr(f, u->bt_album);
 		fputs(",\"error\":", f); jstr(f, u->bt_err);
-		fputs("},\"stations\":[", f);
+		fputs("},\"btout\":", f);
+		ui_btout_json(u, f);
+		ui_ext_state(u, f);   /* the screens of ext/ that have a state of their own (clock, songlog, path) */
+		fputs(",\"stations\":[", f);
 		for (i = 0; i < u->nstations; i++) {
 			fprintf(f, "%s", i ? "," : "");
 			jstr(f, u->stations[i].name);
@@ -8112,7 +8585,7 @@ static void web_poll(struct ui *u)
 			jstr(f, lab);
 		}
 		fprintf(f, ",\"browse_sel\":%d,\"browse\":[", u->bsel);
-		for (i = 0; u->rows && i < u->nrows && i < 400; i++) {
+		for (i = 0; u->rows && i < u->nrows && i < 1200; i++) {   /* a station list can grow by 200 at a time ("Load more") */
 			fprintf(f, "%s{\"dir\":%d,\"name\":", i ? "," : "", u->rows[i].is_dir);
 			jstr(f, u->rows[i].name);
 			fputs(",\"path\":", f);
@@ -8150,6 +8623,7 @@ int main(int argc, char **argv)
 		u.bt_wfd = -1;
 	}
 	u.cfg_input = -1;
+	u.bt_vol = -1;
 
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--keep"))
@@ -8195,6 +8669,7 @@ int main(int argc, char **argv)
 	u.in_auto_s = 3;
 	u.rb_steps = 4;
 	u.resume = 1;
+	u.art_mode = 2;
 	u.vis_shared.on = 3;   /* level bars and spectrum */
 	u.vis_shared.first = 1;
 	u.seen_pos = -2;
@@ -8242,7 +8717,7 @@ int main(int argc, char **argv)
 	load_config(&u, CONF_PATH);
 	u.bal_live = 1;   /* the process before may have left the two sides apart: the first volume write puts them right */
 	theme_apply(&u);
-	u.act_t = u.start_t = now_ms();
+	u.act_t = u.touch_t = u.start_t = now_ms();
 	if (u.resume_name[0])
 		u.resume_t = now_ms() + 4000;
 	if (trace)
@@ -8359,9 +8834,19 @@ int main(int argc, char **argv)
 						handle(&u, &ev);
 			}
 			STAGE("mpd_poll", mpd_poll(&u));
+			STAGE("stream_watch", stream_watch(&u));
 			STAGE("meter_poll", meter_poll(&u));
 			STAGE("cd_poll", cd_poll(&u));
 			STAGE("bt_poll", bt_poll(&u));
+			{   /* what is played from the network goes to the Bluetooth device alone: the main output stays silent */
+				int hold = ui_btout_routed() && u.input == X45_IN_NETWORK;
+
+				if (hold != bt_hw_mute) {
+					bt_hw_mute = hold;
+					settle_hw(&u);
+					bt_vol_swap(&u, hold);   /* the level the knob moves changes with it */
+				}
+			}
 			STAGE("ext_poll", ui_ext_poll(&u));
 			STAGE("scr_poll", scr_poll(&u));
 			STAGE("sys_poll", sys_poll(&u));
@@ -8383,10 +8868,14 @@ int main(int argc, char **argv)
 			lib_poll(&u);
 			if (u.vol_dirty && now_ms() - u.last_vol_change > 2000) {
 				char v[16];
-				int sv = u.hp_present && u.spk_volume > 0 ? u.spk_volume : u.volume;
+				int sv = u.bt_swap ? u.bt_spk : u.hp_present && u.spk_volume > 0 ? u.spk_volume : u.volume;
 
 				u.vol_dirty = 0;
-				if (!u.hp_present || u.spk_volume > 0) {
+				if (u.bt_vol >= 0) {
+					snprintf(v, sizeof v, "%d", u.bt_vol);
+					save_config_key("btout_volume", v);
+				}
+				if (u.bt_swap || !u.hp_present || u.spk_volume > 0) {
 					snprintf(v, sizeof v, "%d", sv);
 					save_config_key("volume", v);
 				}
@@ -8455,6 +8944,7 @@ int main(int argc, char **argv)
 	meter_stop(&u);
 	tuner_stop(&u);
 	bt_stop(&u);
+	ui_btout_release(&u);
 	mpdc_close(&u.mpd);
 	free(u.rows);
 	x45_gfx_close(&u.g);

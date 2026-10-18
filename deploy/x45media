@@ -58,8 +58,9 @@ sata_enable() {
 	log "sata hot-plug enabled and the port re-probed"
 }
 
-# name -> directory name that is safe in a path
-clean() { echo "$1" | tr -c 'A-Za-z0-9._\n-' '_'; }
+# name -> directory name that is safe in a path: one line of [A-Za-z0-9._-], never starting with a dot
+# (a disk labelled ".." would otherwise be mounted onto /mnt/.., which is /, and take over the root directory)
+clean() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | sed 's/^\./_/'; }
 
 mount_one() {
 	dev=$1
@@ -77,12 +78,14 @@ mount_one() {
 	[ -z "$name" ] && name=$base
 	[ -d "/mnt/$name" ] && grep -q " /mnt/$name " /proc/mounts && name=$base
 	mkdir -p "/mnt/$name"
+	# nothing on a plugged-in disk is ever run or may act as a device node or a set-uid file
+	safe=nosuid,nodev,noexec
 	case $type in
-	vfat)          mount -t vfat -o ro,noatime,utf8,shortname=mixed "$dev" "/mnt/$name" ;;
-	ntfs|exfat)    mount -t ufsd -o ro,noatime,nls=utf8 "$dev" "/mnt/$name" ;;
-	ext2|ext3|ext4) mount -t "$type" -o ro,noatime "$dev" "/mnt/$name" ;;
-	iso9660|udf|hfsplus) mount -t "$type" -o ro "$dev" "/mnt/$name" ;;
-	*)             mount -o ro "$dev" "/mnt/$name" ;;
+	vfat)          mount -t vfat -o ro,noatime,$safe,utf8,shortname=mixed "$dev" "/mnt/$name" ;;
+	ntfs|exfat)    mount -t ufsd -o ro,noatime,$safe,nls=utf8 "$dev" "/mnt/$name" ;;
+	ext2|ext3|ext4) mount -t "$type" -o ro,noatime,$safe "$dev" "/mnt/$name" ;;
+	iso9660|udf|hfsplus) mount -t "$type" -o ro,$safe "$dev" "/mnt/$name" ;;
+	*)             mount -o ro,$safe "$dev" "/mnt/$name" ;;
 	esac
 	if [ $? -eq 0 ]; then
 		log "mounted $dev ($type) on /mnt/$name"
@@ -90,6 +93,21 @@ mount_one() {
 	fi
 	rmdir "/mnt/$name" 2>/dev/null
 	log "could not mount $dev ($type)"
+	return 1
+}
+
+# Is a change to the disks under way? The writers (the web server, the panel) leave their pid in /tmp/x45media.hold.
+# A marker whose process is gone (killed in the middle of a change) is removed, or the disks would stay read-write for
+# good; an empty one (a writer between creating and filling it, or one of an older build) counts for ten minutes.
+hold_active() {
+	[ -e /tmp/x45media.hold ] || return 1
+	holder=$(cat /tmp/x45media.hold 2>/dev/null)
+	if [ -n "$holder" ]; then
+		kill -0 "$holder" 2>/dev/null && return 0
+	elif [ -n "$(find /tmp/x45media.hold -mmin -10 2>/dev/null)" ]; then
+		return 0
+	fi
+	rm -f /tmp/x45media.hold
 	return 1
 }
 
@@ -136,7 +154,7 @@ pass() {
 	# (a restart). A music player writes nothing, and a disk pulled out while mounted read-write is left dirty:
 	# put such a mount back, unless the vendor UI is running, a recording is being written or the panel is
 	# deleting (it holds /tmp/x45media.hold for that).
-	if [ -z "$(pidof x20)" ] && [ -z "$(pidof x45rec)" ] && [ ! -e /tmp/x45media.hold ]; then
+	if [ -z "$(pidof x20)" ] && [ -z "$(pidof x45rec)" ] && ! hold_active; then
 		grep '^/dev/sd' /proc/mounts | while read -r dev mp fs opts rest; do
 			case $opts in
 			rw|rw,*) mount -o remount,ro "$mp" >/dev/null 2>&1 && log "$mp back to read-only" ;;
@@ -153,7 +171,8 @@ pass() {
 		[ -z "$mp" ] && continue
 		name=${mp##*/}
 		tgt=$mp
-		[ -d "$mp/My Music" ] && tgt="$mp/My Music"
+		# not when "My Music" is a link: on a foreign disk it can point anywhere, even at the root file system
+		[ -d "$mp/My Music" ] && [ ! -L "$mp/My Music" ] && tgt="$mp/My Music"
 		ln -sfn "$tgt" "$MEDIA/$name"
 		new="$new $name"
 	done < "$TMP"

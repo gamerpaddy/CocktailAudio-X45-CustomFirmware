@@ -40,6 +40,18 @@ static int find_net(struct x45_wifi *w, const char *s)
 	return -1;
 }
 
+/* a network name is any 32 bytes an access point cares to broadcast: a terminal must not obey them */
+static const char *vis(const char *s)
+{
+	static char b[96];
+	size_t i;
+
+	for (i = 0; s[i] && i < sizeof b - 1; i++)
+		b[i] = (unsigned char)s[i] < 32 || s[i] == 127 ? '?' : s[i];
+	b[i] = 0;
+	return b;
+}
+
 static int cmd_status(struct x45_wifi *w)
 {
 	struct x45_wifi_status st;
@@ -53,7 +65,7 @@ static int cmd_status(struct x45_wifi *w)
 	if (st.wpa_state[0])
 		printf("wpa_state=%s\n", st.wpa_state);
 	if (st.ssid[0])
-		printf("ssid=%s\nfreq=%d\nbssid=%s\n", st.ssid, st.freq, st.bssid);
+		printf("ssid=%s\nfreq=%d\nbssid=%s\n", vis(st.ssid), st.freq, st.bssid);
 	if (st.ip[0])
 		printf("ip=%s\nrssi=%d\n", st.ip, st.rssi);
 	return 0;
@@ -68,7 +80,7 @@ static int cmd_aps(struct x45_wifi *w)
 		return die("aps", n);
 	for (i = 0; i < n; i++)
 		printf("%4d dBm %5d MHz  %-9s%s%s  %s\n", ap[i].rssi, ap[i].freq, ap[i].sec,
-		       ap[i].saved >= 0 ? " saved" : "", ap[i].unsupported ? " unsupported" : "", ap[i].ssid);
+		       ap[i].saved >= 0 ? " saved" : "", ap[i].unsupported ? " unsupported" : "", vis(ap[i].ssid));
 	return 0;
 }
 
@@ -95,7 +107,7 @@ static int cmd_list(struct x45_wifi *w)
 	if (c < 0)
 		return die("list", c);
 	for (i = 0; i < c; i++)
-		printf("%d  %-32s %s%s%s\n", n[i].id, n[i].ssid, n[i].open ? "open" : "key",
+		printf("%d  %-32s %s%s%s\n", n[i].id, vis(n[i].ssid), n[i].open ? "open" : "key",
 		       n[i].auto_join ? "" : "  no-autoconnect", n[i].current ? "  [current]" : "");
 	return 0;
 }

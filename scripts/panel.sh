@@ -13,7 +13,7 @@ need_tools make
 "$SCRIPTS/prepare-src.sh"
 
 log "programs"
-TARGETS="x45ctl x45fb x45in x45mpc x45ui x45play x45loop x45cd x45rec x45tuner x45web x45upnp x45rb x45wifi"
+TARGETS="x45ctl x45fb x45in x45mpc x45ui x45play x45loop x45cd x45rec x45tuner x45web x45upnp x45rb x45wifi x45wd x45art"
 if ! skipped bluetooth; then TARGETS="$TARGETS aicload sgsend"; fi
 mk=()
 for t in $TARGETS; do mk+=("$OUT/$t"); done

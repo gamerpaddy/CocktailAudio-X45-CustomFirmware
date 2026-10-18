@@ -40,7 +40,7 @@ async function scan(){
   setTimeout(loadScan, 4000);
 }
 function tick(){
-  if(tab !== "wifi"){ return; }
+  if(tab !== "wifi" || document.hidden){ return; }   /* no scans for a page nobody looks at */
   load();
   if(ST && ST.state !== "off" && ST.state !== "starting" && Date.now() - lastScan > 15000) scan();
 }

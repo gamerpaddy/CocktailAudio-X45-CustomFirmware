@@ -3,7 +3,7 @@
 (function(){
 "use strict";
 
-let roots = null, asked = 0;
+let roots = null, asked = 0, err = "";
 
 function fmtSize(n){
   if(n < 1024) return n + " B";
@@ -15,7 +15,10 @@ function fmtSize(n){
 function load(){
   asked = Date.now();
   const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
-  fetch("/api/files/roots", {headers: h}).then(r => r.ok ? r.json() : null).then(j => { roots = j || []; tabsSig = ""; sigs.body = ""; }).catch(() => { roots = []; });
+  fetch("/api/files/roots", {headers: h}).then(r => {
+    err = r.ok ? "" : r.status === 401 ? "the unit asks for its access token" : r.status === 503 ? "the unit is busy" : "error " + r.status;
+    return r.ok ? r.json() : null;
+  }).then(j => { roots = j || []; tabsSig = ""; sigs.body = ""; }).catch(() => { err = "the unit cannot be reached"; roots = []; });
 }
 
 function draw(){
@@ -28,7 +31,7 @@ function draw(){
       return '<p><a href="' + esc(link(r.path)) + '" target="_blank"><b>' + esc(r.name) + '</b></a> <span class="dim">' + esc(r.fs) + (r.rw ? "" : ", read-only") +
         '</span><span class="bar" style="display:block;cursor:default"><div style="width:' + used + '%"></div></span>' +
         '<span class="dim">' + fmtSize(r.free) + ' free of ' + fmtSize(r.total) + '</span></p>';
-    }).join("") : roots ? '<p class="dim">No disk is attached.</p>' : '<p class="dim">loading...</p>');
+    }).join("") : roots ? (err ? '<p class="bad">The disks cannot be listed: ' + esc(err) + '.</p>' : '<p class="dim">No disk is attached.</p>') : '<p class="dim">loading...</p>');
 }
 
 registerTab({ id: "files", label: "Files", screen: -1, render: draw, wire: () => {} });

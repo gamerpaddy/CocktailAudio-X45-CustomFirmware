@@ -225,8 +225,11 @@ static int play_wav(const char *path, const char *dev, struct out *o)
 			uint32_t want = sz > sizeof fmt ? sizeof fmt : sz;
 			if (fread(fmt, 1, want, f) != want)
 				goto out;
-			if (sz > want)
+			if (sz > want) {
+				if (sz - want > 0x7ffffff0u)   /* a long is 32 bits: a huge size would seek backwards, into this very header */
+					goto out;
 				fseek(f, (long)(sz - want), SEEK_CUR);
+			}
 			if (want < 16 || (rd16(fmt) != 1 && rd16(fmt) != 0xFFFE)) {   /* plain PCM (or its extensible form) only */
 				fprintf(stderr, "x45play: %s: not PCM audio\n", path);
 				goto out;
@@ -238,6 +241,8 @@ static int play_wav(const char *path, const char *dev, struct out *o)
 			data_len = sz > 0x7fffffffu ? 0x7fffffff : (long)sz;   /* long is 32 bits here */
 			break;
 		} else {
+			if (sz > 0x7ffffff0u)
+				goto out;
 			fseek(f, (long)((sz + 1) & ~1u), SEEK_CUR);
 		}
 	}

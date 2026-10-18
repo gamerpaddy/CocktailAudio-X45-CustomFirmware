@@ -68,6 +68,9 @@ see [Quick start](#quick-start).
   FRITZ!Box, fetched over UPnP), from your favourites, and from the open radio-browser.info directory.
 - Station search on the panel: type to filter, with an on-screen keyboard that the knob or the remote's number keys
   (multi-tap, like old phones) can use.
+- A radio stream that goes silent because the internet dropped is noticed and the station is started again by itself,
+  with growing pauses between the tries.
+- A song log of what the radio stations announced, with a star to mark songs, in the web interface (CSV export).
 
 ### Network streaming
 
@@ -108,7 +111,13 @@ see [Quick start](#quick-start).
 - A REST API for everything the panel can do, see [docs/X45-API.md](docs/X45-API.md).
 - File manager in the browser: browse, upload, download, rename, delete, zip, drag and drop. USB and SATA disks are
   mounted read-only and switched to read-write only while you change something. MPD follows the changes.
-- Optional access token for everything that writes.
+- Optional access token for everything that writes. Pages of other web sites cannot use the API (no open CORS, the
+  host name and the origin of a request are checked).
+- Clock with a sleep timer that fades the volume out, a signal path screen, and a child lock for the keys and the
+  remote.
+- A Health tab in the web interface (uptime, load, temperatures, memory, disks, services, logs) and a hardware
+  watchdog that restarts the panel program when it hangs and falls back to the original software after repeated
+  crashes.
 
 ## Screenshots
 
@@ -146,8 +155,8 @@ Not done yet:
 - **The build scripts lag behind the unit.** Wi-Fi, Bluetooth output and artwork work on the unit this was developed
   on, but the scripts here do not build everything for them yet. The kernel driver for the Wi-Fi stick has to be
   built against the unit's own kernel, which the automated build does not do, so a package built from these scripts
-  has the Wi-Fi tools, screens and web tab but not the driver. The artwork helper and the Bluetooth output daemon are
-  not part of the build scripts yet either. Until that is done, use the Ethernet port.
+  has the Wi-Fi tools, screens and web tab but not the driver. The Bluetooth output daemon is not part of the build
+  scripts yet either. Until that is done, use the Ethernet port.
 - **SSH.** The unit has an SSH server, and it works, but the package does not switch it on for you.
 - **HDMI output.** The unit has the port, and the panel is drawn on the built-in display only. Nobody has written
   the HDMI output yet.

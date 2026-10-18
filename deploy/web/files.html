@@ -367,7 +367,9 @@ async function refreshRoots() {
   st.roots.forEach(r => node(r.path, r.name));
 }
 
+let navSeq = 0;   /* a late answer of an earlier folder or search must not replace the view the user moved on to */
 async function showOverview() {
+  navSeq++;
   st.mode = "overview"; st.path = ""; st.find = null; st.sel.clear(); st.items = []; st.view = [];
   await refreshRoots();
   $("overview").innerHTML = st.roots.length ? st.roots.map(r => {
@@ -381,9 +383,12 @@ async function showOverview() {
 
 async function load(path, keep) {
   let j;
+  const my = ++navSeq;
   try { j = await api("list?p=" + enc(path)); }
-  catch(e) { toast(e.message, true); if (st.mode === "overview" || !st.path) { showOverview(); } else history.replaceState(null, "", hashFor(st.path)); return; }
+  catch(e) { if (my !== navSeq) return; toast(e.message, true); if (st.mode === "overview" || !st.path) { showOverview(); } else history.replaceState(null, "", hashFor(st.path)); return; }
+  if (my !== navSeq) return;
   if (!st.roots.length) await refreshRoots();
+  if (my !== navSeq) return;
   st.mode = "dir"; st.find = null; st.path = j.path; st.root = j.root; st.rw = !!j.rw; st.free = j.free || 0; st.total = j.total || 0;
   if (j.path !== path) history.replaceState(null, "", hashFor(j.path));
   st.items = j.items.map(it => Object.assign(it, {p: join(j.path, it.n)}));
@@ -398,8 +403,10 @@ async function load(path, keep) {
 const reload = () => st.mode === "find" ? runFind(st.find.q, true) : st.path ? load(st.path, true) : showOverview();
 
 async function runFind(q, keep) {
+  const my = ++navSeq;
   try {
     const j = await api("find?p=" + enc(st.find ? st.find.dir : st.path) + "&q=" + enc(q));
+    if (my !== navSeq) return;
     const dir = st.find ? st.find.dir : st.path;
     st.find = {q, dir}; st.mode = "find";
     st.items = j.items.map(it => ({n: it.n, t: it.t, s: it.s, m: it.m, p: it.path}));
