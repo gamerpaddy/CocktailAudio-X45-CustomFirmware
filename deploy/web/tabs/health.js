@@ -1,17 +1,15 @@
-/* Health tab: how the unit is doing (GET /api/health), its logs (GET /api/logs), the access token (GET/POST /api/access)
+/* Health tab: how the unit is doing (GET /api/health), its logs (GET /api/logs)
  * and the child lock of the panel (`childlock 1|0`, `childlock volume 0|1`). Everything is read from the unit itself. */
 (function(){
 "use strict";
-let H = null, ACC = null, loading = false, last = 0;
+let H = null, loading = false, last = 0;
 let LOGS = null, logName = "ui", logOld = 0, logLines = 300, logText = null, logNote = "";
-let accNote = "";
 
 const kb = v => v >= 1048576 ? (v / 1048576).toFixed(1) + " GB" : v >= 1024 ? Math.round(v / 1024) + " MB" : v + " kB";
 const mb = v => v >= 1024 ? (v / 1024).toFixed(1) + " GB" : v + " MB";
 const dur = s => { s = Math.floor(s || 0); const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return d ? d + " d " + h + " h" : h ? h + " h " + m + " min" : m + " min " + (s % 60) + " s"; };
 const bytes = n => n >= 1073741824 ? (n / 1073741824).toFixed(1) + " GB" : n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.round(n / 1024) + " kB";
-const hdrs = () => { const h = {}; if(token()) h["Authorization"] = "Bearer " + token(); return h; };
 
 async function fetchHealth(){
   if(loading) return;
@@ -20,17 +18,13 @@ async function fetchHealth(){
     const r = await fetch("/api/health", { cache: "no-store" });
     if(r.ok){ H = await r.json(); sigs.body = null; if(window.render) window.render(); }
   }catch(e){}
-  try{
-    const r = await fetch("/api/access", { cache: "no-store" });
-    if(r.ok) ACC = await r.json();
-  }catch(e){}
   loading = false;
 }
 
 async function fetchLogs(){
   try{
-    const r = await fetch("/api/logs", { cache: "no-store", headers: hdrs() });
-    if(r.ok){ LOGS = await r.json(); } else if(r.status === 401){ logNote = "The logs need the access token."; }
+    const r = await fetch("/api/logs", { cache: "no-store" });
+    if(r.ok){ LOGS = await r.json(); }
   }catch(e){}
   sigs.body = null; if(window.render) window.render();
 }
@@ -39,36 +33,11 @@ async function loadLog(){
   const name = logName === "kernel" ? "kernel" : logName + (logOld ? "." + logOld : "") + "/" + logLines;
   logText = "loading..."; sigs.body = null; if(window.render) window.render();
   try{
-    const r = await fetch("/api/logs/" + name, { cache: "no-store", headers: hdrs() });
-    if(r.status === 401){
-      const t = prompt("This unit needs an access token:");
-      if(t){ try{ localStorage.setItem(TOKEN_KEY, t); }catch(e){} return loadLog(); }
-      logText = "The logs need the access token.";
-    }else{
-      logText = r.ok ? (await r.text()) || "(empty)" : "No such log yet.";
-    }
+    const r = await fetch("/api/logs/" + name, { cache: "no-store" });
+    logText = r.ok ? (await r.text()) || "(empty)" : "No such log yet.";
   }catch(e){ logText = "Cannot read the log."; }
   sigs.body = null; if(window.render) window.render();
   const pre = document.getElementById("hlpre"); if(pre) pre.scrollTop = pre.scrollHeight;
-}
-
-async function setToken(tok){
-  try{
-    const r = await fetch("/api/access", { method: "POST", body: tok, headers: hdrs() });
-    if(r.status === 401){
-      const t = prompt("This unit needs the current access token:");
-      if(t){ try{ localStorage.setItem(TOKEN_KEY, t); }catch(e){} return setToken(tok); }
-      accNote = "Not changed."; return;
-    }
-    const j = await r.json().catch(() => ({}));
-    if(r.ok){
-      try{ if(tok) localStorage.setItem(TOKEN_KEY, tok); else localStorage.removeItem(TOKEN_KEY); }catch(e){}
-      accNote = tok ? "Saved. Changes now need this token; looking is still free." : "Removed. Everybody can change things again.";
-    }else{
-      accNote = j.error || "Not saved";
-    }
-  }catch(e){ accNote = "Not saved: " + e; }
-  last = 0; fetchHealth();
 }
 
 function bar(frac, warnAt){
@@ -158,13 +127,8 @@ function logs(){
 }
 
 function access(){
-  let h = '<h3>Access</h3>';
-  if(!ACC) return h + '<div class="dim">loading...</div>';
-  h += '<div>' + (ACC.protected ? '<span class="ok">Protected</span>: anybody can look, changes need the token.' : '<span class="bad">Open</span>: anybody on the network can change things.') + '</div>' +
-    '<div class="row"><input type="text" id="hacc" placeholder="new token, 4 to 64 letters or digits" style="flex:1;width:auto;min-width:200px" autocomplete="off">' +
-    '<button id="hsetacc">' + (ACC.protected ? "Change" : "Set") + '</button>' + (ACC.protected ? '<button class="del" id="hclracc">Remove</button>' : "") + '</div>' +
-    '<div class="dim">' + esc(accNote) + '</div>';
-  return h;
+  return '<h3>Access</h3><div class="ok">Local IP addresses only</div>' +
+    '<div class="dim">Public source addresses are rejected. SSH can be enabled or disabled in Options on the player.</div>';
 }
 
 function draw(){
@@ -175,7 +139,7 @@ function draw(){
 
 registerTab({
   id: "health", label: "Health", screen: -1,
-  show: () => { last = 0; accNote = ""; },
+  show: () => { last = 0; },
   render: draw,
   busy: b => { const a = document.activeElement; return !!(a && (a.tagName === "INPUT" || a.tagName === "SELECT") && b.contains(a)); },
   wire: b => {
@@ -187,8 +151,6 @@ registerTab({
     if(q("hlold")) q("hlold").onchange = e => { logOld = +e.target.value; };
     if(q("hllines")) q("hllines").onchange = e => { logLines = +e.target.value; };
     if(q("hlshow")) q("hlshow").onclick = () => { loadLog(); };
-    if(q("hsetacc")) q("hsetacc").onclick = () => { const v = q("hacc").value.trim(); if(v) setToken(v); else accNote = "Type the new token first."; sigs.body = null; if(window.render) window.render(); };
-    if(q("hclracc")) q("hclracc").onclick = () => { if(confirm("Remove the token? Everybody on the network can then change things.")) setToken(""); };
   }
 });
 })();

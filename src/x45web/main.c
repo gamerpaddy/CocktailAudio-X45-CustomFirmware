@@ -18,11 +18,10 @@
  *   /api/wifi/..               the WiFi settings (api_wifi.c)
  *   /api/cd/..                 the disc in the drive: own tags, rip log (api_cd.c)
  *   /api/health, /api/logs/..  how the unit is doing, its logs (api_health.c)
- *   /api/access                the access token (api_access.c)
  *
- * Everything under /api is also served as /api/v1 (same thing, for apps). CORS is open;
- * if etc/x45ui.conf has "web_token = X", every POST must carry "Authorization: Bearer X"
- * (or "X-Token: X").
+ * Everything under /api is also served as /api/v1 (same thing, for apps). There is no login and no token:
+ * only peers on private addresses are served (main loop), a request must name the unit by address or a local
+ * name (Host), and a POST/PUT from a browser page of another site is refused (Origin). No CORS headers are sent.
  *
  * usage: x45web [-p port] [-d webdir]
  */
@@ -57,7 +56,6 @@
 #define ART_FILE "/tmp/x45art/cur"   /* kept by the panel (x45ui, ext/art.c) */
 #define METER_FILE "/tmp/x45meter.json"
 #define METER_WANT "/tmp/x45meter.want"
-#define CONF_FILE  "/home/root/x45new/etc/x45ui.conf"
 #define STATIONS_FILE "/home/root/x45new/etc/stations.txt"
 #define MEDIA_DIR  "/home/root/x45new/media"
 #define HOLD_FILE  "/tmp/x45media.hold"   /* the media helper leaves a disk alone while this exists */
@@ -65,6 +63,9 @@
 #define FB_DEV     "/dev/fb0"
 #include "jpegenc.h"
 #include "web.h"
+#include "../libx45/localnet.h"
+#include "../libx45/persist.h"
+#include <poll.h>
 
 #define FB_W 1024
 #define FB_H 600
@@ -88,10 +89,6 @@ static void send_all(int fd, const void *buf, size_t n)
 	}
 }
 
-/* 1 when `web_cross_site = on` is in x45ui.conf: pages of other sites may use the API (open CORS, no Origin/Host checks), as the
- * early versions allowed. Off by default: a page opened in any browser on the network could otherwise drive the unit. Set per request. */
-int web_cors;
-
 void respond(int fd, int code, const char *type, const void *body, size_t len)
 {
 	char h[512];   /* the longest header set (a 507 with a JSON type) is about 330 bytes */
@@ -100,11 +97,8 @@ void respond(int fd, int code, const char *type, const void *body, size_t len)
 			  code == 500 ? "Internal Server Error" : code == 503 ? "Service Unavailable" : code == 507 ? "Insufficient Storage" : "Error";
 	int n = snprintf(h, sizeof h,
 			 "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
-			 "Cache-Control: no-store\r\n%sConnection: close\r\n\r\n",
-			 code, msg, type, len,
-			 web_cors ? "Access-Control-Allow-Origin: *\r\n"
-				    "Access-Control-Allow-Headers: Authorization, X-Token, Content-Type\r\n"
-				    "Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS\r\n" : "");
+			 "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+			 code, msg, type, len);
 
 	if (n >= (int)sizeof h)
 		n = (int)sizeof h - 1;
@@ -242,7 +236,7 @@ static void send_stream(int fd, int full)
 		}
 	}
 	snprintf(head, sizeof head, "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=x45frame\r\n"
-		 "Cache-Control: no-store\r\nConnection: close\r\n%s\r\n", web_cors ? "Access-Control-Allow-Origin: *\r\n" : "");
+		 "Cache-Control: no-store\r\nConnection: close\r\n\r\n");
 	send_all(fd, head, strlen(head));
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	started = ts.tv_sec;
@@ -316,7 +310,6 @@ static void post_cmd(int fd, const char *body, size_t len)
 {
 	char clean[4096];
 	size_t i, n = 0;
-	int f;
 
 	if (len > sizeof clean - 2) {   /* cutting it would queue half a command line */
 		respond_text(fd, 413, "command too long");
@@ -330,59 +323,11 @@ static void post_cmd(int fd, const char *body, size_t len)
 	}
 	if (n && clean[n - 1] != '\n')
 		clean[n++] = '\n';
-	f = open(CMD_FILE, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
-	if (f < 0) {
-		respond_text(fd, 503, "cannot queue the command");
+	if (x45_queue_append(CMD_FILE, clean, n) != 0) {
+		respond_text(fd, 503, "cannot queue the complete command");
 		return;
 	}
-	{
-		struct stat st;
-
-		if (fstat(f, &st) == 0 && st.st_size > 64 * 1024) {   /* the panel takes the file every few hundred ms; this one is not being read */
-			close(f);
-			respond_text(fd, 503, "the command queue is full");
-			return;
-		}
-	}
-	if (write(f, clean, n) < 0) {
-		close(f);
-		respond_text(fd, 503, "cannot queue the command");
-		return;
-	}
-	close(f);
 	respond_text(fd, 200, "ok");
-}
-
-static int conf_get(const char *key, char *out, size_t sz)
-{
-	FILE *f = fopen(CONF_FILE, "r");
-	char line[256];
-	size_t kl = strlen(key);
-	int found = 0;
-
-	if (!f)
-		return 0;
-	while (fgets(line, sizeof line, f)) {
-		char *v = line;
-
-		while (*v == ' ' || *v == '\t')   /* api_access.c and x45ui read an indented key too */
-			v++;
-		if (strncmp(v, key, kl))
-			continue;
-		v += kl;
-		while (*v == ' ' || *v == '\t')
-			v++;
-		if (*v != '=')
-			continue;
-		v++;
-		while (*v == ' ' || *v == '\t')
-			v++;
-		v[strcspn(v, "\r\n")] = '\0';
-		snprintf(out, sz, "%s", v);
-		found = 1;
-	}
-	fclose(f);
-	return found;
 }
 
 void jesc(FILE *f, const char *t)
@@ -853,8 +798,19 @@ static void favourites_get(int fd)
 
 #define FAV_BUF (1 << 17)   /* room for the header and for the router's block (500 stations are about 50 KB) */
 
-/* POST: the whole list as "name<TAB>url" lines replaces the owner's stations; the header and the managed block stay */
+static void favourites_put_locked(int fd, const char *body, size_t len);
+
+/* POST: the whole list as "name<TAB>url" lines replaces the owner's stations; the header and the managed block stay.
+ * Under the station file's lock: the panel and the router sync write it too. */
 static void favourites_put(int fd, const char *body, size_t len)
+{
+	int lock = x45_file_lock(STATIONS_FILE);
+
+	favourites_put_locked(fd, body, len);
+	x45_file_unlock(lock);
+}
+
+static void favourites_put_locked(int fd, const char *body, size_t len)
 {
 	FILE *f = fopen(STATIONS_FILE, "r");
 	char line[1200], tmp[200];
@@ -949,71 +905,6 @@ static void favourites_put(int fd, const char *body, size_t len)
 	respond_text(fd, 200, "ok");
 }
 
-/* the header value at p is exactly s (and not merely something that starts with it) */
-static int hdr_is(const char *p, const char *s)
-{
-	size_t n = strlen(s);
-
-	return !strncmp(p, s, n) && (p[n] == '\r' || p[n] == '\n' || p[n] == ' ' || p[n] == '\0');
-}
-
-static int authorized(const char *req, const char *hdr_end)
-{
-	char tok[128], want[160];
-	const char *p;
-
-	if (!conf_get("web_token", tok, sizeof tok) || !tok[0])
-		return 1;
-	snprintf(want, sizeof want, "Bearer %s", tok);
-	p = strcasestr(req, "\r\nauthorization:");
-	if (p && p < hdr_end) {
-		p += 16;
-		while (*p == ' ')
-			p++;
-		if (hdr_is(p, want))
-			return 1;
-	}
-	p = strcasestr(req, "\r\nx-token:");
-	if (p && p < hdr_end) {
-		p += 10;
-		while (*p == ' ')
-			p++;
-		if (hdr_is(p, tok))
-			return 1;
-	}
-	return 0;
-}
-
-/* The file manager is open to the same people as the rest, but its GETs show the storage too: with a web_token
- * set they need it as well. A link or a picture cannot carry a header, so "tok=" in the query does for them. */
-static int files_authorized(const char *req, const char *hdr_end, const char *query)
-{
-	char tok[128], got[160];
-	const char *t = query;
-	size_t n = 0;
-
-	if (!conf_get("web_token", tok, sizeof tok) || !tok[0])
-		return 1;
-	if (authorized(req, hdr_end))
-		return 1;
-	while ((t = strstr(t, "tok=")) && t != query && t[-1] != '&')
-		t += 4;
-	if (!t)
-		return 0;
-	for (t += 4; *t && *t != '&' && n < sizeof got - 1; t++) {
-		if (t[0] == '%' && isxdigit((unsigned char)t[1]) && isxdigit((unsigned char)t[2])) {
-			char h[3] = { t[1], t[2], 0 };
-
-			got[n++] = (char)strtol(h, NULL, 16);
-			t += 2;
-		} else {
-			got[n++] = *t;
-		}
-	}
-	got[n] = '\0';
-	return !strcmp(got, tok);
-}
-
 /* the value of the request header `name` ("\r\nhost:" - lower case, with the CR LF before and the colon), trimmed; 0 when
  * the request has no such header */
 static int hdr_get(const char *req, const char *hdr_end, const char *name, char *out, size_t cap)
@@ -1032,13 +923,6 @@ static int hdr_get(const char *req, const char *hdr_end, const char *name, char 
 		n--;
 	out[n] = '\0';
 	return 1;
-}
-
-static int conf_on(const char *key)
-{
-	char v[16];
-
-	return conf_get(key, v, sizeof v) && (!strcasecmp(v, "on") || !strcasecmp(v, "yes") || !strcmp(v, "1"));
 }
 
 /* DNS rebinding: a page of another site can make its own name point at this unit, and then read and drive the
@@ -1105,7 +989,6 @@ static void serve(int fd)
 
 	setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 	setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-	web_cors = conf_on("web_cross_site");
 	alarm(20);   /* the whole request must arrive within this: a sender that trickles bytes would otherwise keep the process (of MAX_KIDS) for ever */
 	while (have < sizeof req - 1) {
 		ssize_t r = read(fd, req + have, sizeof req - 1 - have);
@@ -1147,17 +1030,17 @@ static void serve(int fd)
 	}
 	if (!strncmp(path, "/api/v1/", 8) || !strcmp(path, "/api/v1"))
 		memmove(path + 4, path + 7, strlen(path + 7) + 1);   /* /api/v1/x -> /api/x */
-	if (!web_cors) {
+	{
 		char host[256];
 		int have_host = hdr_get(req, hdr_end, "\r\nhost:", host, sizeof host);
 
 		if (have_host && !host_ok(host)) {
-			respond_text(fd, 403, "this name is not allowed (use the unit's address, or set web_cross_site = on)");
+			respond_text(fd, 403, "this name is not allowed (use the unit's address)");
 			return;
 		}
 		if (strcmp(method, "GET") && strcmp(method, "HEAD") && strcmp(method, "OPTIONS") &&
 		    !origin_ok(req, hdr_end, have_host ? host : "")) {
-			respond_text(fd, 403, "request from another site refused (set web_cross_site = on to allow it)");
+			respond_text(fd, 403, "request from another site refused");
 			return;
 		}
 	}
@@ -1170,10 +1053,6 @@ static void serve(int fd)
 		struct web_req rq;
 		struct timeval slow = { 30, 0 };
 
-		if (!files_authorized(req, hdr_end, query)) {
-			respond_text(fd, 401, "token required");
-			return;
-		}
 		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &slow, sizeof slow);
 		setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &slow, sizeof slow);
 		alarm(0);   /* an upload or a download takes as long as it takes */
@@ -1210,15 +1089,6 @@ static void serve(int fd)
 		return;
 	}
 	alarm(0);   /* the request is whole; streams and long answers may take their time */
-	if (!strcmp(method, "POST") && !authorized(req, hdr_end)) {
-		respond_text(fd, 401, "token required");
-		return;
-	}
-	/* the logs say what the unit does and when: with a token set they need it, like the file manager */
-	if (!strncmp(path, "/api/logs", 9) && !files_authorized(req, hdr_end, query)) {
-		respond_text(fd, 401, "token required");
-		return;
-	}
 
 	/* the endpoint modules (api_*.c), each owning one prefix */
 	if (api_wifi(fd, method, path, hdr_end + 4, body_have < clen ? body_have : clen))
@@ -1228,8 +1098,6 @@ static void serve(int fd)
 	if (api_cd(fd, method, path, hdr_end + 4, body_have < clen ? body_have : clen))
 		return;
 	if (api_health(fd, method, path, hdr_end + 4, body_have < clen ? body_have : clen))
-		return;
-	if (api_access(fd, method, path, hdr_end + 4, body_have < clen ? body_have : clen))
 		return;
 	if (!strcmp(method, "POST") && !strcmp(path, "/api/cmd")) {
 		post_cmd(fd, hdr_end + 4, body_have < clen ? body_have : clen);
@@ -1328,13 +1196,36 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	for (;;) {
-		int c = accept(ls, NULL, NULL);
+		int c;
+		struct sockaddr_in peer;
+		socklen_t peerlen = sizeof peer;
 		pid_t pid;
+		struct pollfd ready = { ls, POLLIN, 0 };
+		while (waitpid(-1, NULL, WNOHANG) > 0) kids--;
+		if (poll(&ready, 1, 250) <= 0) continue;
+		c = accept(ls, (struct sockaddr *)&peer, &peerlen);
 
 		if (c < 0) {
 			if (errno == EINTR)
 				continue;
 			usleep(100000);
+			continue;
+		}
+		if (peer.sin_family != AF_INET || !x45_local_ipv4(ntohl(peer.sin_addr.s_addr))) {
+			/* reject before parsing HTTP; forwarded headers cannot override the peer. One line a minute in the log:
+			 * a page that "does not load" from a VPN or another subnet would otherwise leave no trace */
+			static time_t last_refusal;
+			time_t now = time(NULL);
+
+			if (now - last_refusal >= 60 || now < last_refusal) {
+				char ip[INET_ADDRSTRLEN] = "?";
+
+				last_refusal = now;
+				if (peer.sin_family == AF_INET)
+					inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof ip);
+				fprintf(stderr, "x45web: refused a connection from %s (not a private address)\n", ip);
+			}
+			close(c);
 			continue;
 		}
 		/* one process per connection; the finished ones are collected here, and a flood of connections gets a plain

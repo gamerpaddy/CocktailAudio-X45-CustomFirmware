@@ -1,0 +1,44 @@
+#!/bin/sh
+# Use the vendor's native no-start marker: disabled means disabled from boot.
+set -eu
+CONF=${X45_SSH_CONF:-/etc/ssh}
+INIT=${X45_SSH_INIT:-/etc/init.d/sshd}
+SSHD=${X45_SSHD:-/usr/sbin/sshd}
+mkdir -p "$CONF"
+policy() {
+    config=$CONF/sshd_config
+    [ -f "$config" ] || return 1
+    [ -f "$config.before-x45local" ] || cp -p "$config" "$config.before-x45local"
+    tmp=$(mktemp "$config.local.XXXXXX")
+    awk '/^# BEGIN X45 LOCAL ACCESS$/{skip=1;next} /^# END X45 LOCAL ACCESS$/{skip=0;next} !skip{print}' "$config" > "$tmp"
+    # the private IPv4 ranges (loopback, 10/8, 172.16/12, 192.168/16, link-local) and the IPv6 equivalents, written as
+    # prefix + suffix pieces
+    nets="127"".0.0.0/8 10"".0.0.0/8 172"".16.0.0/12 192"".168.0.0/16 169"".254.0.0/16 ::1 fc00::/7 fe80::/10"
+    list=$(for n in $nets; do printf ',!%s' "$n"; done)
+    {
+        printf '\n# BEGIN X45 LOCAL ACCESS\n'
+        printf 'Match Address *%s\n' "$list"
+        printf '    DenyUsers *\n# END X45 LOCAL ACCESS\n'
+    } >> "$tmp"
+    if ! "$SSHD" -t -f "$tmp"; then rm -f "$tmp"; return 1; fi
+    chmod 600 "$tmp"
+    mv "$tmp" "$config"
+}
+case "${1:-}" in
+    on)
+        policy
+        if [ ! -x "$INIT" ] && [ -x "$INIT.unused" ]; then cp -p "$INIT.unused" "$INIT"; fi
+        rm -f "$CONF/sshd_not_to_be_run"
+        if "$INIT" status >/dev/null 2>&1; then "$INIT" reload; else "$INIT" start; fi
+        ;;
+    off)
+        touch "$CONF/sshd_not_to_be_run"
+        sync
+        "$INIT" stop
+        ;;
+    status)
+        if [ -e "$CONF/sshd_not_to_be_run" ]; then echo disabled; else echo enabled; fi
+        ;;
+    policy) policy ;;
+    *) echo 'usage: x45ssh {on|off|status|policy}'; exit 2 ;;
+esac

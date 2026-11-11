@@ -30,6 +30,7 @@
 
 struct ui_ext {
 	const char *name, *title, *menu;
+	int (*menu_visible)(void); /* optional: hide an action that is not needed */
 	void (*enter)(struct ui *u);
 	void (*leave)(struct ui *u);
 	void (*draw)(struct ui *u);

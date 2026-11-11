@@ -1,0 +1,16 @@
+--- a/common.c
++++ b/common.c
+@@ -935,8 +935,11 @@
+     mbedtls_rsa_set_padding(trsa, MBEDTLS_RSA_PKCS_V15, MBEDTLS_MD_NONE);    
+     outbuf = malloc(trsa->MBEDTLS_PRIVATE_V3_ONLY(len));
+ #if MBEDTLS_VERSION_MAJOR == 3
+-    rc = mbedtls_rsa_pkcs1_encrypt(trsa, mbedtls_ctr_drbg_random, &ctr_drbg,
+-                                   inlen, input, outbuf);
++    /* mbedTLS 3 removed the key-mode argument: pkcs1_encrypt always uses the PUBLIC key
++       with random type-2 padding, which no AirPlay client accepts as an Apple-Response.
++       The response is a raw PKCS#1 v1.5 type-1 signature made with the PRIVATE key. */
++    rc = mbedtls_rsa_pkcs1_sign(trsa, mbedtls_ctr_drbg_random, &ctr_drbg, MBEDTLS_MD_NONE,
++                                inlen, input, outbuf);
+ #else
+     rc = mbedtls_rsa_pkcs1_encrypt(trsa, mbedtls_ctr_drbg_random, &ctr_drbg, MBEDTLS_RSA_PRIVATE,
+                                    inlen, input, outbuf);

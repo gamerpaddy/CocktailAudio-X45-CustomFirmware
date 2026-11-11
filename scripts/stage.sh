@@ -33,7 +33,7 @@ put "$WORK/mpd-build/mpd.stripped" mpd
 
 # shell scripts of the stack (start up, helpers for the receivers, the Wi-Fi hooks)
 for f in x45stack x45media x45radio-sync x45ftp x45-airplay-begin x45-airplay-end x45-spotify-event \
-	x45bt-run x45btout-run x45wifi-run x45wifi-dhcp x45wifi-event; do
+	x45bt-run x45btout-run x45wifi-run x45wifi-dhcp x45wifi-event x45diag x45ssh x45radio-install; do
 	[ -f "$X45_ROOT/deploy/$f" ] || die "missing deploy/$f"
 	sed 's/\r$//' "$X45_ROOT/deploy/$f" >"$T/bin/$f"
 	chmod 755 "$T/bin/$f"
@@ -84,6 +84,7 @@ log "icons, web pages, scripts, fonts"
 install -m644 "$X45_ROOT"/deploy/icons/*.png "$T/icons/"
 install -m644 "$X45_ROOT"/deploy/web/*.html "$T/web/"
 install -m644 "$X45_ROOT"/deploy/web/tabs/*.js "$T/web/tabs/"
+install -m644 "$X45_ROOT/deploy/lib/radio-files.txt" "$T/lib/radio-files.txt"
 for f in "$X45_ROOT"/deploy/lib/sh/*; do
 	sed 's/\r$//' "$f" >"$T/lib/sh/$(basename "$f")"
 	chmod 644 "$T/lib/sh/$(basename "$f")"

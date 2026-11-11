@@ -20,6 +20,7 @@ extern const struct ui_ext ext_songlog;
 extern const struct ui_ext ext_path;
 extern const struct ui_ext ext_heartbeat;
 extern const struct ui_ext ext_childlock;
+extern const struct ui_ext ext_radioinstall, ext_ssh;
 
 static const struct ui_ext *const all[] = {
 	&ext_wifi,
@@ -33,6 +34,8 @@ static const struct ui_ext *const all[] = {
 	&ext_path,
 	&ext_heartbeat,
 	&ext_childlock,
+	&ext_radioinstall,
+	&ext_ssh,
 };
 #define NEXT ((int)(sizeof all / sizeof *all))
 
@@ -278,7 +281,7 @@ int ui_ext_menu_count(void)
 	int i, n = 0;
 
 	for (i = 0; i < NEXT; i++)
-		n += all[i]->menu != NULL;
+		n += all[i]->menu && (!all[i]->menu_visible || all[i]->menu_visible());
 	return n;
 }
 
@@ -287,7 +290,7 @@ const struct ui_ext *ui_ext_menu_at(int k)
 	int i;
 
 	for (i = 0; i < NEXT; i++)
-		if (all[i]->menu && k-- == 0)
+		if (all[i]->menu && (!all[i]->menu_visible || all[i]->menu_visible()) && k-- == 0)
 			return all[i];
 	return NULL;
 }

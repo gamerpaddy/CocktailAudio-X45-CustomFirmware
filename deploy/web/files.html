@@ -117,7 +117,6 @@ td.nm input.rn{width:min(100%,420px)}
 <body>
 <header class="top">
   <a href="/">&larr; X45</a><b>Files</b><span class="dim" id="msg"></span><span class="sp"></span>
-  <span class="dim" id="who"></span>
 </header>
 <div class="toolbar" id="bar1">
   <button id="side" title="Show or hide the folder tree">&#9776;</button>
@@ -197,9 +196,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const join = (d, n) => d === "/" ? "/" + n : d + "/" + n;
 const dirname = p => { const i = p.lastIndexOf("/"); return i <= 0 ? "/" : p.slice(0, i); };
 const basename = p => p.slice(p.lastIndexOf("/") + 1);
-const TOKEN_KEY = "x45token";
-const token = () => { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch(e) { return ""; } };
-const setToken = t => { try { localStorage.setItem(TOKEN_KEY, t); } catch(e) {} };
 const collator = new Intl.Collator(undefined, {numeric: true, sensitivity: "base"});
 
 /* ---------- what kinds of file there are ---------- */
@@ -275,19 +271,11 @@ async function askText(title, label, value) {
 }
 
 /* ---------- talking to the unit ---------- */
-function authHeaders(h) { h = h || {}; if (token()) h["Authorization"] = "Bearer " + token(); return h; }
-/* a link or form that cannot carry a header carries the token in the query */
-const tok = () => token() ? "&tok=" + enc(token()) : "";
 async function api(path, o, tries) {
-  o = Object.assign({}, o); o.headers = authHeaders(o.headers);
+  o = Object.assign({}, o);
   let r, txt;
   try { r = await fetch("/api/files/" + path, o); txt = await r.text(); } catch(e) { throw new Error("The unit does not answer"); }
   let j = null; try { j = JSON.parse(txt); } catch(e) {}
-  if (r.status === 401) {
-    const t = prompt("This unit needs an access token:");
-    if (t) { setToken(t); return api(path, o, tries); }
-    throw new Error("A token is needed");
-  }
   if (r.status === 503 && j && /busy/.test(j.error) && (tries || 0) < 40) { await sleep(750); return api(path, o, (tries || 0) + 1); }
   if (!r.ok) throw new Error(j && j.error ? j.error : "Error " + r.status);
   return j;
@@ -298,7 +286,7 @@ async function op(cmd, paths, extra) {
   Object.keys(extra || {}).forEach(k => body += "&" + k + "=" + enc(extra[k]));
   return api("op", {method: "POST", headers: {"Content-Type": "application/x-www-form-urlencoded"}, body});
 }
-const fileUrl = (p, dl) => "/api/files/get?p=" + enc(p) + (dl ? "&dl=1" : "") + tok();
+const fileUrl = (p, dl) => "/api/files/get?p=" + enc(p) + (dl ? "&dl=1" : "");
 
 /* ---------- state ---------- */
 const st = {
@@ -554,7 +542,7 @@ function download(items) {
     return;
   }
   const f = $("zipform");
-  f.action = "/api/files/zip" + (token() ? "?tok=" + enc(token()) : "");
+  f.action = "/api/files/zip";
   f.innerHTML = "";
   const add = (k, v) => { const i = document.createElement("input"); i.type = "hidden"; i.name = k; i.value = v; f.appendChild(i); };
   items.forEach(it => add("p", it.p));
@@ -668,7 +656,6 @@ function putFile(file, dest, over, onprog) {
   return new Promise(res => {
     const x = new XMLHttpRequest(); U.xhr = x;
     x.open("PUT", "/api/files/put?p=" + enc(dest) + (over ? "&over=1" : ""));
-    if (token()) x.setRequestHeader("Authorization", "Bearer " + token());
     x.upload.onprogress = e => onprog(e.loaded);
     x.onload = () => { let j = null; try { j = JSON.parse(x.responseText); } catch(e) {} res({status: x.status, err: j && j.error}); };
     x.onerror = () => res({status: 0, err: "The upload broke off"});
@@ -740,7 +727,6 @@ async function upload(entries) {
         if (r.status === 503 && /busy/.test(r.err || "")) { await sleep(1000); }
       } while (r.status === 503 && /busy/.test(r.err || "") && ++tries < 40);
       U.bytesDone = base + e.file.size;
-      if (r.status === 401) { const t = prompt("This unit needs an access token:"); if (t) { setToken(t); U.q.unshift(e); U.bytesDone = base; continue; } }
       if (r.status !== 200) { if (r.status === -1) break; failed.push(e.rel + ": " + (r.err || "error " + r.status)); }
       else names.add(name);
     } catch(err) { failed.push(e.rel + ": " + err.message); }
@@ -802,7 +788,7 @@ const E = {it: null, crlf: false, latin: false, orig: "", size: 14};
 async function openEditor(it) {
   if (it.s > 2 * 1024 * 1024) { toast("Too big to edit here (2 MB at most). Download it instead.", true); return; }
   let buf;
-  try { const r = await fetch(fileUrl(it.p, true), {headers: authHeaders()}); if (!r.ok) throw new Error("Error " + r.status); buf = new Uint8Array(await r.arrayBuffer()); }
+  try { const r = await fetch(fileUrl(it.p, true)); if (!r.ok) throw new Error("Error " + r.status); buf = new Uint8Array(await r.arrayBuffer()); }
   catch(e) { toast("Cannot read it: " + e.message, true); return; }
   if (buf.subarray(0, 8192).includes(0)) { toast("\"" + it.n + "\" is not a text file. Download it instead.", true); return; }
   let text; E.latin = false;
@@ -1047,7 +1033,6 @@ $("q").addEventListener("keydown", e => {
 
 /* ---------- start ---------- */
 (async function init() {
-  $("who").textContent = token() ? "token set" : "";
   await refreshRoots(); renderTree(); route();
 })();
 </script>

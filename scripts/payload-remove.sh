@@ -59,6 +59,15 @@ else
     echo "--- there was no program tree"
 fi
 
+# the player's SSH switch (x45ssh) edits sshd_config and may leave a no-start marker: give the original back
+# (a missing backup means the switch was never used and there is nothing to undo)
+if [ -f /tmp/p3/etc/ssh/sshd_config.before-x45local ]; then
+    cp -p /tmp/p3/etc/ssh/sshd_config.before-x45local /tmp/p3/etc/ssh/sshd_config
+    rm -f /tmp/p3/etc/ssh/sshd_config.before-x45local
+    echo "--- sshd_config restored"
+fi
+rm -f /tmp/p3/etc/ssh/sshd_not_to_be_run
+
 ls -la /tmp/p3/home/root /tmp/p3/etc/init.d/x45new /tmp/p3/etc/rc5.d/S98x45new 2>&1
 cp "$LOG" /tmp/p3/mnt/x45-remove.log 2>/dev/null
 sync

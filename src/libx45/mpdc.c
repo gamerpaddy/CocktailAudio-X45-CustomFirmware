@@ -15,8 +15,34 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <poll.h>
+#include <time.h>
 
 #define IO_TIMEOUT_S 2
+/* Commands that MPD itself may legitimately need a while for (it reads the database, walks a folder or waits for the
+ * disk): they get a longer total limit. A trickling peer is still cut off, only later. */
+#define LONG_IO_TIMEOUT_S 15
+
+static int slow_command(const char *cmd)
+{
+	static const char *const slow[] = { "add", "addid", "update", "rescan", "lsinfo", "listall", "listallinfo",
+					    "listfiles", "find", "findadd", "search", "searchadd", "list", "count",
+					    "playlistinfo", "load", "listplaylistinfo", "plchanges", "playlistfind",
+					    "playlistsearch", "readpicture", "albumart", "stats" };
+	size_t n = strcspn(cmd, " \t"), i;
+
+	for (i = 0; i < sizeof slow / sizeof *slow; i++)
+		if (strlen(slow[i]) == n && !strncmp(cmd, slow[i], n))
+			return 1;
+	return 0;
+}
+
+static int64_t mono_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
 
 /* Bounded string copy; clipping is the intent (tags and ACK text can be long). */
 static void copy(char *dst, size_t cap, const char *src)
@@ -54,6 +80,8 @@ static int read_line(struct mpdc *c, char *line, size_t cap)
 	size_t out = 0;
 
 	for (;;) {
+		if (c->deadline_ms && mono_ms() >= c->deadline_ms)
+			return -ETIMEDOUT;
 		while (c->rpos < c->rlen) {
 			char ch = c->rbuf[c->rpos++];
 			if (ch == '\n') {
@@ -65,6 +93,15 @@ static int read_line(struct mpdc *c, char *line, size_t cap)
 		}
 		c->rpos = c->rlen = 0;
 		{
+			if (c->deadline_ms) {
+				struct pollfd p = { c->fd, POLLIN, 0 };
+				int64_t left = c->deadline_ms - mono_ms();
+				int ready;
+				if (left <= 0) return -ETIMEDOUT;
+				ready = poll(&p, 1, (int)left);
+				if (ready == 0) return -ETIMEDOUT;
+				if (ready < 0) { if (errno == EINTR) continue; return -errno; }
+			}
 			ssize_t r = recv(c->fd, c->rbuf, sizeof c->rbuf, 0);
 			if (r < 0) {
 				if (errno == EINTR)
@@ -132,6 +169,7 @@ int mpdc_open(struct mpdc *c, const char *host, int port)
 		return r;
 	}
 	c->fd = fd;
+	c->deadline_ms = mono_ms() + IO_TIMEOUT_S * 1000;
 
 	r = read_line(c, line, sizeof line);
 	if (r < 0) {
@@ -199,6 +237,7 @@ int mpdc_run(struct mpdc *c, const char *cmd, mpdc_kv_fn cb, void *ud,
 	if (err && errlen)
 		err[0] = '\0';
 	c->last_error[0] = '\0';
+	c->deadline_ms = mono_ms() + (slow_command(cmd) ? LONG_IO_TIMEOUT_S : IO_TIMEOUT_S) * 1000;
 	if (c->fd < 0)
 		return -ENOTCONN;
 	if (n && cmd[n - 1] == '\n')

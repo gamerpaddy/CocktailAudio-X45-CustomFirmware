@@ -1,0 +1,81 @@
+#!/bin/sh
+# Offline installer: the bundled kit, or x45-radio-kit at a mounted USB root.
+# No download execution, compiler, SSH, or saved WiFi/BT settings required.
+#
+# The files of a kit are accepted only when they match the hashes that the installed package carries
+# (lib/radio-kit.sha256, written when the package was built from the real kit files). A kit cannot vouch for itself
+# with a checksum list of its own: any stick with the right folder name would otherwise get its programs installed
+# as root. A file that is present but differs from the pinned version is replaced (an update).
+set -eu
+ROOT=${X45_ROOT:-/home/root/x45new}
+MOUNTS=${X45_MOUNTS:-/mnt}
+STATUS=${X45_INSTALL_STATUS:-/tmp/x45radio-install.status}
+LIST=$ROOT/lib/radio-files.txt
+PINNED=$ROOT/lib/radio-kit.sha256
+complete() {
+    [ -s "$LIST" ] || return 1
+    while IFS= read -r f; do
+        [ -s "$ROOT/$f" ] || return 1
+        case "$f" in bin/*) [ -x "$ROOT/$f" ] || return 1 ;; esac
+    done < "$LIST"
+}
+note() { printf '%s\n' "$*" > "$STATUS.tmp"; mv "$STATUS.tmp" "$STATUS"; }
+fail() { note "$*"; exit 1; }
+case "${1:-}" in
+    --check) complete; exit $? ;;
+    install) ;;
+    *) echo 'usage: x45radio-install {--check|install}'; exit 2 ;;
+esac
+mkdir -p "$ROOT/etc"
+exec 9> "$ROOT/etc/radio-install.lock"
+flock -n 9 || exit 1
+# up to date: everything there, and (when the package pins versions) every file is the pinned one
+if complete; then
+    same=1
+    if [ -s "$PINNED" ]; then
+        while read -r want name; do
+            [ "$(sha256sum "$ROOT/$name" 2>/dev/null | cut -d' ' -f1)" = "$want" ] || same=0
+        done < "$PINNED"
+    fi
+    [ "$same" = 1 ] && { note 'WiFi and Bluetooth are already installed'; exit 0; }
+fi
+[ -s "$LIST" ] || fail 'Component list missing: reinstall the player package'
+[ -s "$PINNED" ] || fail 'This package carries no hashes for a kit: install a package that has them'
+KIT=
+for dir in "$ROOT/share/radio-kit" "$MOUNTS"/*/x45-radio-kit; do
+    [ -s "$dir/kernel-release" ] || continue
+    [ "$(cat "$dir/kernel-release")" = "$(uname -r)" ] || continue
+    KIT=$dir
+    break
+done
+[ -n "$KIT" ] || fail 'Insert a USB drive with a matching x45-radio-kit folder, then press OK'
+note 'Checking WiFi and Bluetooth components...'
+# Only the fixed list is accepted; a kit cannot add files outside these locations.
+while IFS= read -r f; do
+    case "$f" in bin/*|lib/sh/*|wifi/mod/*|wifi/fw/*|bt/aicfw/*) ;; *) fail 'Invalid component list' ;; esac
+    case "$f" in *..*|*[!a-zA-Z0-9_./-]*) fail 'Invalid component path' ;; esac
+    [ -f "$KIT/$f" ] && [ ! -L "$KIT/$f" ] || fail "Kit is missing $f"
+    want=$(awk -v name="$f" '$2 == name {print $1}' "$PINNED")
+    [ -n "$want" ] || fail "No pinned hash for $f"
+    have=$(sha256sum "$KIT/$f" | cut -d' ' -f1)
+    [ "$want" = "$have" ] || fail "Checksum failed: $f"
+done < "$LIST"
+note 'Installing missing or outdated WiFi and Bluetooth components...'
+while IFS= read -r f; do
+    present=1
+    [ -s "$ROOT/$f" ] || present=0
+    case "$f" in bin/*) [ -x "$ROOT/$f" ] || present=0 ;; esac
+    if [ "$present" = 1 ]; then
+        # already the pinned version: leave it; otherwise replace it by renaming (a running program keeps running)
+        want=$(awk -v name="$f" '$2 == name {print $1}' "$PINNED")
+        have=$(sha256sum "$ROOT/$f" | cut -d' ' -f1)
+        [ "$want" = "$have" ] && continue
+    fi
+    mkdir -p "$(dirname "$ROOT/$f")"
+    cp "$KIT/$f" "$ROOT/$f.installing" || fail "Could not copy $f"
+    case "$f" in bin/*) chmod 755 "$ROOT/$f.installing" ;; *) chmod 644 "$ROOT/$f.installing" ;; esac
+    mv "$ROOT/$f.installing" "$ROOT/$f" || fail "Could not install $f"
+done < "$LIST"
+sync
+complete || fail 'Installation incomplete; press OK to retry'
+note 'Installed. Open Network or Bluetooth output in Options to connect'

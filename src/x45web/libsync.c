@@ -15,6 +15,7 @@
  * than a handful, everything is updated instead.
  */
 #include "web.h"
+#include "../libx45/persist.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -91,14 +92,8 @@ static int uri_of(const char *dir, char *out, size_t cap)
 
 static void send_cmd(const char *line)
 {
-	int f = open(CMD_FILE, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
-	ssize_t got;
-
-	if (f < 0)
-		return;
-	got = write(f, line, strlen(line));
-	(void)got;
-	close(f);
+	if (x45_queue_append(CMD_FILE, line, strlen(line)) != 0)
+		fprintf(stderr, "x45libsync: could not queue library update\n");
 }
 
 static void flush_dirs(void)

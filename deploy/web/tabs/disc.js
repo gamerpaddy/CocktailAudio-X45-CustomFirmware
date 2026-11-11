@@ -55,10 +55,8 @@ function lines(){
 }
 
 async function post(text){
-  const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
   try{
-    const r = await fetch("/api/cd/meta", { method: "POST", body: text, headers: h });
-    if(r.status === 401){ const t = prompt("This unit needs an access token:"); if(t){ try{ localStorage.setItem(TOKEN_KEY, t); }catch(e){} return post(text); } return; }
+    const r = await fetch("/api/cd/meta", { method: "POST", body: text });
     const j = await r.json().catch(() => ({}));
     note = r.ok ? "Saved. The panel shows the names the next time the disc is read." : (j.error || "Not saved");
   }catch(e){ note = "Not saved: " + e; }

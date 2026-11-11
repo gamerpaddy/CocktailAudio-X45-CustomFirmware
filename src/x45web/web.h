@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdio.h>
 
-extern int web_cors;   /* the answers carry the open CORS headers (see main.c); the modules that write their own headers test it */
 void respond(int fd, int code, const char *type, const void *body, size_t len);
 void respond_text(int fd, int code, const char *text);
 void respond_json(int fd, int code, const char *json);
@@ -19,7 +18,6 @@ int api_wifi(int fd, const char *method, const char *path, const char *body, siz
 int api_songlog(int fd, const char *method, const char *path, const char *body, size_t len);
 int api_cd(int fd, const char *method, const char *path, const char *body, size_t len);
 int api_health(int fd, const char *method, const char *path, const char *body, size_t len);
-int api_access(int fd, const char *method, const char *path, const char *body, size_t len);
 
 /* A request whose body is not buffered whole (uploads): the headers, and what of the body came with them.
  * The module reads the rest from `fd` itself. */

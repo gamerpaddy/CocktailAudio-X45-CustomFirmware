@@ -14,9 +14,8 @@ function fmtSize(n){
 
 function load(){
   asked = Date.now();
-  const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
-  fetch("/api/files/roots", {headers: h}).then(r => {
-    err = r.ok ? "" : r.status === 401 ? "the unit asks for its access token" : r.status === 503 ? "the unit is busy" : "error " + r.status;
+  fetch("/api/files/roots").then(r => {
+    err = r.ok ? "" : r.status === 503 ? "the unit is busy" : "error " + r.status;
     return r.ok ? r.json() : null;
   }).then(j => { roots = j || []; tabsSig = ""; sigs.body = ""; }).catch(() => { err = "the unit cannot be reached"; roots = []; });
 }

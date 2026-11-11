@@ -71,6 +71,10 @@ if [ "$n" -eq 0 ]; then
 fi
 
 touch "$FILE"
+# the station file has three writers (this script, the panel, the web page): they take turns on $FILE.lock
+# (the programs use flock(2) on the same file), so a save in the middle of this read-and-rewrite is not lost
+exec 8>"$FILE.lock"
+flock -w 20 8 || echo "x45radio-sync: the station file is busy; going on without the lock" >&2
 {
 	awk -v b="$BEGIN" -v e="$END" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$FILE"
 	echo "$BEGIN"
@@ -79,6 +83,7 @@ touch "$FILE"
 } > "$TMP.new"
 # written beside the file and renamed over it: a power cut or a save from the web page in between cannot leave half a list
 cat "$TMP.new" > "$FILE.sync" && mv "$FILE.sync" "$FILE"
+exec 8>&-
 rm -f "$TMP" "$TMP.new"
 echo "$(date '+%F %T') x45radio-sync: $n stations from the FRITZ!Box" >> "$LOG"
 echo "x45radio-sync: $n stations"

@@ -7,12 +7,14 @@
  * (An earlier version looped the capture into the XMOS; that was wrong, and
  * SIGKILLing a 192k USB stream wedges the XMOS until reboot.)
  *
- *   x45loop [-r rate] [-b 16|24] [-f fifo] [-s specfile]
+ *   x45loop [-r rate] [-b 16|24] [-f fifo] [-s specfile] [-o pcmfifo]
  *
  *   -r rate   sample rate (default 192000)
  *   -b bits   capture format, 24 (default) or 16
  *   -f fifo   read S16_LE stereo from this FIFO (MPD's fifo output) instead of ALSA
  *   -s file   also write the analyzer state there (JSON, replaced atomically ~25x/s)
+ *   -o fifo   also send the capture there as 44.1 kHz S16 stereo, converted from the measured rate (the Bluetooth
+ *             output's FIFO, for the sources that are heard in hardware)
  *
  * stdout: S16_LE stereo, one frame per ALSA period holding that period's
  * left/right peak (top 16 bits of the 24-bit sample). The reader may be slow or
@@ -53,6 +55,7 @@
 #define WAVE_COLS 200     /* points of each channel handed on */
 
 static volatile sig_atomic_t stop_now;
+static unsigned g_xruns;   /* capture overruns so far: the frames of a window that had one are not all there */
 static void on_sig(int s) { (void)s; stop_now = 1; }
 
 /* ------------------------------------------------------------- analyzer --- */
@@ -76,6 +79,8 @@ struct ana {
 	int estimate;                /* work out the real sample rate from the capture's pace */
 	double tx_t, est_t0;         /* last transform; start of the rate measurement */
 	long est_frames;
+	int est_done;                /* the rate was measured at least once (a->rate is then the real one) */
+	unsigned est_xr, cand;       /* overruns seen at the last window; a rate seen once that differs from the current one */
 	float *wv[2];                /* the last WAVE_RING frames of each channel */
 	unsigned wh;                 /* where the next frame goes (counts on; masked when used) */
 	double slr;                  /* sum of l * r since the last file */
@@ -388,8 +393,148 @@ static void ana_feed(struct ana *a, const float *s, int frames)
 				best = std[k];
 		a->est_t0 = t;
 		a->est_frames = 0;
-		if (best && best != a->rate)
-			ana_setup(a, best);
+		if (g_xruns != a->est_xr) {
+			/* the capture lost frames in this window (an overrun): the count says nothing about the rate. (It once read as
+			 * a lower standard rate for a window: the Bluetooth feed played at the wrong pitch.) */
+			a->est_xr = g_xruns;
+		} else if (!a->est_done) {
+			a->est_done = 1;
+			if (best && best != a->rate)
+				ana_setup(a, best);
+		} else if (best && best != a->rate) {
+			/* a different rate must be seen twice in a row before the tables (and the converter) follow */
+			if (best == a->cand) {
+				a->cand = 0;
+				ana_setup(a, best);
+			} else {
+				a->cand = best;
+			}
+		} else {
+			a->cand = 0;
+		}
+	}
+}
+
+/* ------------------------------------------------------ Bluetooth feed --- */
+/* With -o the capture is also sent to the Bluetooth sender (x45btsrc reads MPD's "bluetooth" FIFO): the radio and the
+ * analogue inputs are heard in hardware and never pass through MPD. The sender wants 44.1 kHz S16 stereo; the
+ * capture runs at whatever rate the source has (48 kHz for DAB, 192 kHz for the SSI capture), so it is converted
+ * here: a windowed-sinc polyphase filter, table of RS_PH phases, linear between them. */
+#define BT_RATE  44100
+#define RS_PH    512
+#define RS_HWMAX 80          /* half width of the filter in input samples */
+#define RS_HIST  16384       /* frames of input history (a period at 384 kHz plus the filter) */
+
+struct rs {
+	int fd;
+	unsigned rin;            /* the rate the table is made for, 0 = none yet */
+	int hw;
+	float *tab;              /* (RS_PH + 2) rows of 2 * hw taps */
+	float *hist;             /* interleaved input frames */
+	int nh;
+	double pos;              /* where the next output sits in hist, in frames */
+	double next_open;
+};
+
+static void rs_setup(struct rs *r, unsigned rin)
+{
+	double fc = 0.46 * (rin > BT_RATE ? (double)BT_RATE / rin : 1.0);   /* cycles per input sample */
+	int hw = (int)ceil(8.0 / (2.0 * fc)), p, j;
+
+	if (hw > RS_HWMAX)
+		hw = RS_HWMAX;
+	for (p = 0; p < RS_PH + 2; p++) {
+		double frac = (double)p / RS_PH, sum = 0;
+		float *row = r->tab + (size_t)p * 2 * hw;
+
+		for (j = 0; j < 2 * hw; j++) {
+			double x = j - hw + 1 - frac, t = 2.0 * fc * x, v, w;
+
+			v = fabs(t) < 1e-9 ? 1.0 : sin(M_PI * t) / (M_PI * t);
+			w = fabs(x) >= hw ? 0.0 : 0.42 + 0.5 * cos(M_PI * x / hw) + 0.08 * cos(2.0 * M_PI * x / hw);
+			row[j] = (float)(v * w);
+			sum += row[j];
+		}
+		for (j = 0; j < 2 * hw; j++)
+			row[j] = (float)(row[j] / sum);
+	}
+	r->rin = rin;
+	r->hw = hw;
+	r->nh = 0;
+	r->pos = hw;
+}
+
+static int rs_init(struct rs *r)
+{
+	memset(r, 0, sizeof *r);
+	r->fd = -1;
+	r->tab = malloc((size_t)(RS_PH + 2) * 2 * RS_HWMAX * sizeof(float));
+	r->hist = malloc((size_t)RS_HIST * 2 * sizeof(float));
+	return r->tab && r->hist ? 0 : -1;
+}
+
+/* frames of interleaved +-1.0 samples at `rin` Hz in; 44.1 kHz S16 out to the FIFO. Whatever the sender does not take is dropped. */
+static void rs_feed(struct rs *r, const char *path, const float *in, int frames, unsigned rin)
+{
+	int16_t out[1024 * 2];
+	int no = 0, hw, drop;
+	double step;
+
+	if (r->fd < 0) {
+		double now = mono_s();
+
+		if (now < r->next_open)
+			return;
+		r->next_open = now + 1.0;
+		r->fd = open(path, O_WRONLY | O_NONBLOCK);   /* fails while nobody has the read end: tried again in a second */
+		if (r->fd < 0)
+			return;
+	}
+	if (rin != r->rin)
+		rs_setup(r, rin);
+	hw = r->hw;
+	if (frames > RS_HIST - r->nh)
+		frames = RS_HIST - r->nh;
+	memcpy(r->hist + (size_t)r->nh * 2, in, (size_t)frames * 2 * sizeof(float));
+	r->nh += frames;
+	step = (double)rin / BT_RATE;
+	while (r->pos + hw < r->nh) {
+		int i0 = (int)r->pos, j;
+		double ph = (r->pos - i0) * RS_PH;
+		int p = (int)ph;
+		float t = (float)(ph - p), l = 0, rr = 0;
+		const float *k0 = r->tab + (size_t)p * 2 * hw, *k1 = k0 + 2 * hw;
+		const float *x = r->hist + (size_t)(i0 - hw + 1) * 2;
+
+		for (j = 0; j < 2 * hw; j++) {
+			float k = k0[j] + t * (k1[j] - k0[j]);
+
+			l += k * x[2 * j];
+			rr += k * x[2 * j + 1];
+		}
+		l *= 32768.0f;
+		rr *= 32768.0f;
+		out[2 * no] = (int16_t)(l > 32767.0f ? 32767 : l < -32768.0f ? -32768 : (int)lrintf(l));
+		out[2 * no + 1] = (int16_t)(rr > 32767.0f ? 32767 : rr < -32768.0f ? -32768 : (int)lrintf(rr));
+		no++;
+		r->pos += step;
+		if (no == 1024) {
+			if (write(r->fd, out, sizeof out) < 0 && errno != EAGAIN && errno != EINTR) {
+				close(r->fd);
+				r->fd = -1;
+			}
+			no = 0;
+		}
+	}
+	if (no && r->fd >= 0 && write(r->fd, out, (size_t)no * 4) < 0 && errno != EAGAIN && errno != EINTR) {
+		close(r->fd);
+		r->fd = -1;
+	}
+	drop = (int)r->pos - hw + 1;
+	if (drop > 0) {
+		memmove(r->hist, r->hist + (size_t)drop * 2, (size_t)(r->nh - drop) * 2 * sizeof(float));
+		r->nh -= drop;
+		r->pos -= drop;
 	}
 }
 
@@ -415,7 +560,7 @@ static int open_capture(snd_pcm_t **pcm, unsigned rate, int bits)
 	    (e = snd_pcm_hw_params_set_rate_near(*pcm, hw, &r, 0)) < 0)
 		goto fail;
 	snd_pcm_hw_params_set_period_size_near(*pcm, hw, &p, 0);
-	buf = p * 4;
+	buf = p * 16;   /* 160 ms at 10 ms periods: a busy moment of the unit is not an overrun */
 	snd_pcm_hw_params_set_buffer_size_near(*pcm, hw, &buf);
 	if ((e = snd_pcm_hw_params(*pcm, hw)) < 0)
 		goto fail;
@@ -470,7 +615,8 @@ int main(int argc, char **argv)
 {
 	unsigned rate = 192000;
 	int bits = 24, i;
-	const char *fifo = NULL, *spec = NULL;
+	const char *fifo = NULL, *spec = NULL, *btout = NULL;
+	struct rs rsm;
 	snd_pcm_t *cap = NULL;
 	int32_t *in;
 	float *fl;
@@ -487,7 +633,11 @@ int main(int argc, char **argv)
 			fifo = argv[++i];
 		else if (!strcmp(argv[i], "-s") && i + 1 < argc)
 			spec = argv[++i];
+		else if (!strcmp(argv[i], "-o") && i + 1 < argc)
+			btout = argv[++i];
 	}
+	if (btout && !spec)
+		spec = "/tmp/x45meter.json";   /* the real rate comes from the analyzer's measurement */
 
 	if (rate < 8000 || rate > 384000)   /* the buffers and the band tables are made for rates up to this */
 		rate = 192000;
@@ -515,6 +665,8 @@ int main(int argc, char **argv)
 		ana_init(&a, rate, spec);
 		a.estimate = 1;
 	}
+	if (btout && rs_init(&rsm) < 0)
+		return 5;
 
 	while (!stop_now && getppid() == parent) { /* leave when the UI is gone */
 		snd_pcm_uframes_t want = bits == 16 ? rate / 100 : PERIOD;
@@ -525,6 +677,8 @@ int main(int argc, char **argv)
 		if (n < 0) {
 			if (n == -EINTR)
 				continue;
+			if (n == -EPIPE)
+				g_xruns++;
 			n = snd_pcm_recover(cap, (int)n, 1);
 			if (n < 0) {
 				fprintf(stderr, "x45loop: capture: %s\n", snd_strerror((int)n));
@@ -551,6 +705,8 @@ int main(int argc, char **argv)
 		}
 		if (spec)
 			ana_feed(&a, fl, (int)n);
+		if (btout && a.est_done)   /* not before the rate is known: the pitch would be wrong */
+			rs_feed(&rsm, btout, fl, (int)n, a.rate);
 		lv[0] = (int16_t)(pk[0] > 32767 ? 32767 : pk[0]);
 		lv[1] = (int16_t)(pk[1] > 32767 ? 32767 : pk[1]);
 		(void)!write(1, lv, sizeof lv); /* pipe full or no reader: drop it */

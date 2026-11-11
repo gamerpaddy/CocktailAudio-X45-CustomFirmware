@@ -18,6 +18,7 @@
 #define MPDC_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,7 @@ struct mpdc {
 	 * connection by itself instead of failing the first command after a quiet spell. */
 	char host[32];
 	int  port;
+	int64_t deadline_ms; /* total reply deadline; trickled bytes cannot extend it */
 };
 
 #define MPDC_DEFAULT_HOST "127.0.0.1"

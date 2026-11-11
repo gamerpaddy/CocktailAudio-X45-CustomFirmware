@@ -1,12 +1,11 @@
 /* WiFi tab: join, forget and look after networks. Talks to /api/wifi (src/x45web/api_wifi.c).
- * Uses the helpers of index.html ($, esc, put, token) and registers itself with registerTab(). */
+ * Uses the helpers of index.html ($, esc, put) and registers itself with registerTab(). */
 (function(){
 "use strict";
 let ST = null, APS = [], msg = "", pending = false, openRow = null, lastScan = 0, timer = 0;
 
 async function api(path, body){
-  const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
-  const o = body === undefined ? {cache:"no-store"} : {method:"POST", body:body, headers:h};
+  const o = body === undefined ? {cache:"no-store"} : {method:"POST", body:body};
   try{
     const r = await fetch("/api/wifi" + path, o);
     let j = null; try{ j = await r.json(); }catch(e){}

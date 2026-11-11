@@ -2,11 +2,10 @@
 
 Base URL `http://<unit>/api/v1/...` (`/api/...` is the same thing). Cross-site use from a web page is off: no CORS
 headers, a foreign `Host` and a POST/PUT with a foreign `Origin` answer 403 (curl and apps send no `Origin` and are not
-affected); `web_cross_site = on` in `etc/x45ui.conf` brings the open CORS back. A request has 20 s to arrive in full
-(slow senders are dropped), an address is at most 2047 bytes (414), `POST /cmd` at most 4094 bytes of body (413),
-`/stream.mjpg` at most 4 viewers at once.
-Optional token: put `web_token = SECRET` in `etc/x45ui.conf`; every POST then needs
-`Authorization: Bearer <token>` (or `X-Token: <token>`). GETs stay open.
+affected). A request has 20 s to arrive in full (slow senders are dropped), an address is at most 2047 bytes (414),
+`POST /cmd` at most 4094 bytes of body (413), `/stream.mjpg` at most 4 viewers at once.
+There is no login and no token: the server answers peers on private addresses only (10/8, 172.16/12, 192.168/16,
+169.254/16, 127/8); a connection from any other address is closed without an answer.
 
 ## Read
 | Request | Returns |
@@ -195,8 +194,4 @@ childlock probe KIND PRESSED   test aid: runs a hardware event through the filte
 |---|---|
 | `GET /health` | `{"up","load","mem","temps":[{"zone","c"}],"disks":[{"mount","fs","total_mb","free_mb"}],"net","procs","wd":{..}\|null,"stack":{"bootcount","enabled","childlock","watchdog_off"},"crashes":[[time,who,what]],"boots":[[time,who,what]]}`, histories newest first |
 | `GET /logs` | the logs there are, with sizes and which old runs (`.1`, `.2`) exist |
-| `GET /logs/NAME[.1\|.2][/N]` | the last N lines of a log; NAME is one of stack, ui, web, wd, crashes, boots, mpd, upnp, airplay, spotify, or `kernel` (dmesg); any other name is 404 |
-| `GET /access` | `{"protected":true\|false}` |
-| `POST /access` | body = the new token (4..64 of `A-Za-z0-9._~-`), or empty to remove it; needs the old token as `Bearer` when one is set; 400 for an invalid token |
-
-With a token set, `/logs*` needs it too (`Bearer` or `?tok=`); the other GETs stay open (a read-only guest view).
+| `GET /logs/NAME[.1\|.2][/N]` | the last N lines of a log; NAME is one of stack, ui, web, wd, crashes, boots, mpd, upnp, airplay, spotify, diag (only written while `etc/diag` exists), or `kernel` (dmesg); any other name is 404 |

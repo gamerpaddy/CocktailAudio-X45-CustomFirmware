@@ -21,7 +21,7 @@
  *   POST /api/files/zip?p=A&p=B[&name=N.zip]       the selection as one (stored) zip file, written while it is read
  *
  * op and zip also take their parameters as a form in the body (a long selection does not fit into a URL).
- * With a web_token set every request needs it ("Authorization: Bearer", or tok= in the query for links).
+ * No token is used: x45web only answers private-network peers (main.c).
  *
  * Paths and names are percent-encoded in the query (encodeURIComponent). The answer to op is
  * {"done":n,"failed":n,"error":"the first reason"}. An attached disk is mounted read-only by the media helper:
@@ -820,10 +820,10 @@ static void ep_get(int fd, const char *method, const struct web_req *rq, const s
 	/* nothing of a file may run as part of this site; the PDF viewer of a browser is sandboxed already, and needs not be */
 	fprintf(f, "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %lld\r\nAccept-Ranges: bytes\r\n%s"
 		"Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n%s"
-		"%sContent-Disposition: %s; filename*=UTF-8''",
+		"Content-Disposition: %s; filename*=UTF-8''",
 		code, code == 206 ? "Partial Content" : "OK", ok ? type : "application/octet-stream", remaining, range_line,
 		ok && !strcmp(type, "application/pdf") ? "" : "Content-Security-Policy: sandbox\r\n",
-		web_cors ? "Access-Control-Allow-Origin: *\r\n" : "", ok ? "inline" : "attachment");
+		ok ? "inline" : "attachment");
 	pct(f, name);
 	fputs("\r\nConnection: close\r\n\r\n", f);
 	fclose(f);
@@ -1817,9 +1817,9 @@ static void ep_zip(int fd, const struct root *roots, int nroots, const char *que
 		if (!f)
 			goto out;
 		fprintf(f, "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nCache-Control: no-store\r\n"
-			"X-Content-Type-Options: nosniff\r\n%s"
+			"X-Content-Type-Options: nosniff\r\n"
 			"Content-Disposition: attachment; filename=\"%s\"; filename*=UTF-8''",
-			web_cors ? "Access-Control-Allow-Origin: *\r\n" : "", fname);
+			fname);
 		pct(f, name);
 		fputs("\r\nConnection: close\r\n\r\n", f);
 		fclose(f);

@@ -4,7 +4,9 @@
 # Started at boot by /etc/init.d/x45new (only when /home/root/x45new/ENABLED
 # exists). It brings up MPD, borrows the panel from x20 and keeps x45ui alive.
 # The vendor UI is always the fallback: if anything here goes wrong x20 is
-# resumed, and nothing in the vendor rootfs was changed to make this work.
+# resumed, and nothing in the vendor rootfs was changed to make this work. (One optional exception: the SSH
+# switch in Options, bin/x45ssh, adds a marked block to /etc/ssh/sshd_config and keeps the original as
+# sshd_config.before-x45local; the removal package puts the original back.)
 #
 # Exit paths: SIGTERM (the init script's `stop`) and a clean x45ui exit both
 # resume x20; x45ui exiting with status 3 (the user confirmed POWER) stops
@@ -47,6 +49,27 @@ trim_log() {
 	[ -f "$1" ] && [ "$(wc -l < "$1")" -gt "$2" ] && { tail -n "$2" "$1" > "$1.tmp" && mv -f "$1.tmp" "$1"; }
 	return 0
 }
+# supervise LOG PAUSE command args...: runs a service for ever. A service that ends after a long run is started again
+# after PAUSE seconds; one that dies at once is started again more and more slowly (PAUSE, 2x, 4x ... at most 60 s), so a
+# service that cannot start (a port that is taken, a missing file) does not spin the CPU and fill the log. The log is
+# rotated before each start when it has grown past 1 MB (a crash loop is what fills it).
+supervise() {
+	_log=$1; _base=$2; _wait=$2
+	shift 2
+	while true; do
+		[ -f "$_log" ] && [ "$(wc -c < "$_log")" -gt 1048576 ] && rotate "$_log"
+		_t0=$(date +%s)
+		"$@" >> "$_log" 2>&1
+		_rc=$?
+		sleep "$_wait"
+		# a run of 30 s, or an end by SIGTERM (the panel cuts a session on purpose by pkill) is not a failure
+		if [ "$_rc" -eq 143 ] || [ $(( $(date +%s) - _t0 )) -ge 30 ]; then
+			_wait=$_base
+		else
+			_wait=$((_wait * 2)); [ "$_wait" -gt 60 ] && _wait=60
+		fi
+	done
+}
 crashlog() { printf '%s\t%s\t%s\n' "$(date '+%F %T')" "$1" "$2" >> "$CRASHLOG"; }
 # the system is going down (halt, poweroff, reboot): starting the vendor UI now would only fight the shutdown
 shutting_down() {
@@ -77,7 +100,7 @@ x20_resume() {
 		rm -f "$X20MARK"
 		log "x20 restarted"
 	else
-		[ -n "$X20PID" ] && kill -CONT "$X20PID" 2>/dev/null && log "x20 (pid $X20PID) resumed"
+		[ -n "$X20PID" ] && kill -CONT $X20PID 2>/dev/null && log "x20 (pid $X20PID) resumed"
 	fi
 }
 
@@ -166,7 +189,7 @@ if [ -f "$X20MARK" ] && [ "$(cat "$X20MARK" 2>/dev/null)" = "$(boot_id)" ]; then
 	log "x20 was taken over by an earlier run of the stack in this boot"
 else
 while [ $n -lt 120 ]; do
-	X20PID=$(pidof x20) && break
+	X20PID=$(pidof x20) && break   # (may list several pids: they are used unquoted below)
 	sleep 1; n=$((n + 1))
 done
 fi
@@ -217,6 +240,7 @@ if [ ! -f "$ROOT/mpd/.media-root" ]; then
 fi
 # sed with | as the delimiter: the path contains spaces but never a pipe
 sed "s|@MUSIC_DIR@|$MUSIC|" "$MPD_TEMPLATE" > "$MPD_CONF"
+chmod 600 "$MPD_CONF"   # (it may get the MPD password below)
 
 # Optional MPD password: `mpd_password = ...` in etc/x45ui.conf. Every local
 # client (x45ui, x45mpc, upmpdcli) is given it; network clients need it too.
@@ -245,12 +269,7 @@ while [ $n -lt 30 ]; do
 done
 
 # MPD is supervised like the other services: if it ever dies the unit would otherwise stay silent until a reboot
-(
-	while true; do
-		"$BIN/mpd" --no-daemon "$MPD_CONF" >> "$ROOT/mpd/stdout" 2>&1
-		sleep 2
-	done
-) &
+supervise "$ROOT/mpd/stdout" 2 "$BIN/mpd" --no-daemon "$MPD_CONF" &
 MPDPID=$!
 n=0
 while [ $n -lt 20 ]; do
@@ -289,12 +308,7 @@ ARBPID=$!
 # Classic AirPlay receiver. It is restarted if it dies; the UI also restarts it
 # on purpose (pkill) to cut a session when the user starts something else.
 if [ -x "$BIN/shairport-sync" ] && [ -f "$ROOT/etc/shairport-sync.conf" ]; then
-	(
-		while true; do
-			"$BIN/shairport-sync" -c "$ROOT/etc/shairport-sync.conf" >> "$ROOT/shairport.log" 2>&1
-			sleep 2
-		done
-	) &
+	supervise "$ROOT/shairport.log" 2 "$BIN/shairport-sync" -c "$ROOT/etc/shairport-sync.conf" &
 	AIRPID=$!
 	log "airplay receiver supervised (pid $AIRPID)"
 fi
@@ -312,12 +326,7 @@ start_upnp() {
 		echo "mpdpassword = $MPD_PASSWORD" >> "$UPCONF"
 		chmod 600 "$UPCONF"
 	fi
-	(
-		while true; do
-			"$BIN/upmpdcli" -m 1 -c "$UPCONF" >> "$ROOT/upmpdcli.out" 2>&1
-			sleep 3
-		done
-	) &
+	supervise "$ROOT/upmpdcli.out" 3 "$BIN/upmpdcli" -m 1 -c "$UPCONF" &
 	UPNPPID=$!
 	log "UPnP renderer supervised (pid $UPNPPID)"
 }
@@ -331,16 +340,10 @@ start_spotify() {
 	[ -x "$BIN/librespot" ] || return
 	grep -qi '^[[:space:]]*spotify[[:space:]]*=[[:space:]]*off' "$ROOT/etc/x45ui.conf" 2>/dev/null && return
 	mkdir -p "$ROOT/spotify-cache"
-	(
-		while true; do
-			"$BIN/librespot" --name "Cocktail Audio X45" --device-type speaker \
-				--backend alsa --device hw:CocktailAudio,0 --format S16 --bitrate 320 \
-				--volume-ctrl fixed --initial-volume 100 --dither none --disable-audio-cache \
-				--cache "$ROOT/spotify-cache" --onevent "$BIN/x45-spotify-event" \
-				>> "$ROOT/librespot.log" 2>&1
-			sleep 3
-		done
-	) &
+	supervise "$ROOT/librespot.log" 3 "$BIN/librespot" --name "Cocktail Audio X45" --device-type speaker \
+		--backend alsa --device hw:CocktailAudio,0 --format S16 --bitrate 320 \
+		--volume-ctrl fixed --initial-volume 100 --dither none --disable-audio-cache \
+		--cache "$ROOT/spotify-cache" --onevent "$BIN/x45-spotify-event" &
 	SPOTPID=$!
 	log "Spotify Connect receiver supervised (pid $SPOTPID)"
 }
@@ -353,7 +356,7 @@ X20PID=$(pidof x20)
 # UPnP renderer needs the SSDP port (UDP 1900) that x20's own DLNA code holds.
 # x20_run exits on SIGKILL (status 137) so nothing respawns it. x20_resume starts
 # it again by the vendor's own init script if we ever hand back.
-if [ -z "$X20KILLED" ] && [ -n "$X20PID" ] && kill -KILL "$X20PID" 2>/dev/null; then
+if [ -z "$X20KILLED" ] && [ -n "$X20PID" ] && kill -KILL $X20PID 2>/dev/null; then
 	X20KILLED=1
 	boot_id > "$X20MARK"
 	log "x20 (pid $X20PID) killed"
@@ -374,12 +377,7 @@ start_web() {
 	grep -qi '^[[:space:]]*web[[:space:]]*=[[:space:]]*off' "$ROOT/etc/x45ui.conf" 2>/dev/null && return
 	# a server left over from an earlier run would keep port 80 and this one would fail to bind it, for ever
 	pkill -x x45web 2>/dev/null && sleep 1
-	(
-		while true; do
-			"$BIN/x45web" -p 80 -d "$ROOT/web" >> "$ROOT/x45web.log" 2>&1
-			sleep 3
-		done
-	) &
+	supervise "$ROOT/x45web.log" 3 "$BIN/x45web" -p 80 -d "$ROOT/web" &
 	WEBPID=$!
 	log "web interface on port 80 (pid $WEBPID)"
 }
@@ -409,6 +407,13 @@ eth_speed() {
 eth_speed
 start_spotify
 start_web
+# diagnostic logger (diag.log): Bluetooth underruns, tuner start-up; writes only when something happens.
+# Off unless etc/diag exists: it wakes up every second (a handful of processes and an MPD connection each time),
+# which is a cost no unit should pay all the time. `touch /home/root/x45new/etc/diag` and restart to switch it on.
+pkill -x x45diag 2>/dev/null
+if [ -x "$BIN/x45diag" ] && [ -f "$ROOT/etc/diag" ]; then
+	"$BIN/x45diag" </dev/null >/dev/null 2>&1 &
+fi
 
 # Input tracing is for diagnosing the panel and is off by default: a turning knob
 # writes dozens of lines a second. `touch /home/root/x45new/etc/ui-trace` and

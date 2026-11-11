@@ -21,8 +21,15 @@ STRIP   := $(CROSS)strip
 # armv7-a + neon matches the i.MX6Q Cortex-A9. -static for the reason above.
 ARCHFLAGS := -march=armv7-a -mtune=cortex-a9 -mfpu=neon -mfloat-abi=hard
 CFLAGS    := -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter $(ARCHFLAGS) \
-             -ffunction-sections -fdata-sections
-LDFLAGS   := -static -Wl,--gc-sections -Wl,-s
+             -ffunction-sections -fdata-sections -fstack-protector-strong
+# Hardening that costs nothing at run time: a stack canary (above) and a read-only relocation table. A position
+# independent executable (-static-pie) would add address randomisation; it is not on yet because it has not been
+# tried on the unit's 3.14 kernel (X45_PIE=1 turns it on for a trial build).
+LDFLAGS   := -static -Wl,--gc-sections -Wl,-s -Wl,-z,relro -Wl,-z,now
+ifdef X45_PIE
+CFLAGS    += -fPIE
+LDFLAGS   := -static-pie -Wl,--gc-sections -Wl,-s -Wl,-z,relro -Wl,-z,now
+endif
 
 OUT ?= out
 LIB := libx45/x45.c libx45/x45clock.c
@@ -65,11 +72,11 @@ $(OUT)/x45in: x45in/main.c $(LIB) libx45/x45in.c libx45/x45.h libx45/x45in.h | $
 # The front-panel UI: software rendering on /dev/fb0, real input, real hardware.
 # Screens that are not built into main.c live in x45ui/ext/ (see ext/ext.h); every *.c there is part of the UI.
 # The same for the looks and the visuals: every x45ui/skins/*.c is a skin (see skins/skin.h), every x45ui/vis/*.c a visual (vis/vis.h).
-EXT := $(wildcard x45ui/ext/*.c) $(wildcard x45ui/skins/*.c) $(wildcard x45ui/vis/*.c) libx45/wifi.c
+EXT := $(wildcard x45ui/ext/*.c) $(wildcard x45ui/skins/*.c) $(wildcard x45ui/vis/*.c) libx45/wifi.c libx45/persist.c
 
-$(OUT)/x45ui: x45ui/main.c x45ui/ui.h $(wildcard x45ui/ext/*.h) $(wildcard x45ui/skins/*.h) $(wildcard x45ui/vis/*.h) $(EXT) $(LIB) libx45/x45in.c libx45/mpdc.c libx45/stations.c $(GFX) \
-              libx45/x45.h libx45/x45in.h libx45/gfx.h libx45/mpdc.h libx45/stations.h libx45/wifi.h | $(OUT)
-	$(CC) $(CFLAGS) -o $@ x45ui/main.c $(EXT) $(LIB) libx45/x45in.c libx45/mpdc.c libx45/stations.c $(GFX) $(LDFLAGS)
+$(OUT)/x45ui: x45ui/main.c x45ui/ui.h $(wildcard x45ui/ext/*.h) $(wildcard x45ui/skins/*.h) $(wildcard x45ui/vis/*.h) $(filter %.c,$(EXT)) $(LIB) libx45/x45in.c libx45/mpdc.c libx45/stations.c $(GFX) \
+              libx45/x45.h libx45/x45in.h libx45/gfx.h libx45/mpdc.h libx45/stations.h libx45/wifi.h libx45/persist.h | $(OUT)
+	$(CC) $(CFLAGS) -o $@ x45ui/main.c $(filter %.c,$(EXT)) $(LIB) libx45/x45in.c libx45/mpdc.c libx45/stations.c $(GFX) $(LDFLAGS)
 	@echo "--- $@"
 	@ls -l $@
 
@@ -101,6 +108,8 @@ $(OUT)/mpdc_test: tests/mpdc_test.c libx45/mpdc.c libx45/mpdc.h | $(OUT)
 # reasons that have nothing to do with the code under test.
 nativetest:
 	mkdir -p $(OUT)
+	gcc -std=gnu11 -Wall -Wextra -fsanitize=address,undefined -o $(OUT)/persist_test_native tests/persist_test.c libx45/persist.c
+	timeout 30 setarch -R ./$(OUT)/persist_test_native
 	gcc -std=gnu11 -Wall -Wextra -Wno-unused-parameter -fsanitize=address,undefined \
 	    -o $(OUT)/mpdc_test_native tests/mpdc_test.c libx45/mpdc.c
 	setarch -R ./$(OUT)/mpdc_test_native
@@ -131,6 +140,31 @@ nativetest:
 # x45upnp against a fake media server on loopback (needs python3)
 upnptest:
 	sh tests/upnp_test.sh
+
+responsivenesstest:
+	gcc -std=gnu11 -O1 -ffunction-sections -fdata-sections -fsanitize=address,undefined -Wl,--gc-sections -o $(OUT)/browse_async_test tests/browse_async_test.c $(filter %.c,$(EXT)) $(LIB) libx45/x45in.c libx45/mpdc.c libx45/stations.c $(GFX) -lm -lpthread
+	timeout 15 setarch -R ./$(OUT)/browse_async_test
+
+# The installer of the Wi-Fi/Bluetooth kit against a fake unit and a fake USB stick (pinned hashes)
+installertest:
+	sh tests/radio_install_test.sh
+
+# The web server as a native sanitizer build on a private port: the protection checks (host, origin, size and time
+# limits, no token) and the reaping of finished connections. Takes about 40 s (it waits out the slow-sender limit).
+webtest:
+	mkdir -p $(OUT)
+	gcc -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wno-unused-result \
+	    -o $(OUT)/x45web_native x45web/main.c $(wildcard x45web/api_*.c x45web/libsync.c) libx45/wifi.c libx45/persist.c -lm
+	setarch -R python3 tests/web_lifecycle_test.py ./$(OUT)/x45web_native
+	set -e; mkdir -p $(OUT)/webtest-tmp; \
+	ASAN_OPTIONS=detect_leaks=0 setarch -R ./$(OUT)/x45web_native -p 18080 -d ../deploy/web > $(OUT)/webtest-tmp/web.log 2>&1 & srv=$$!; \
+	sleep 1; python3 tests/web_protection_test.py 18080; rc=$$?; \
+	kill -TERM $$srv 2>/dev/null; wait $$srv 2>/dev/null || true; \
+	if grep -E 'ERROR: AddressSanitizer|runtime error' $(OUT)/webtest-tmp/web.log; then rc=1; fi; exit $$rc
+
+# everything that can run on the PC in one go (about a minute and a half)
+check: nativetest responsivenesstest installertest webtest
+	@echo "check: everything passed"
 
 $(OUT)/fold_test: tests/fold_test.c libx45/textfold.c libx45/gfx.h | $(OUT)
 	$(CC) $(CFLAGS) -o $@ tests/fold_test.c libx45/textfold.c $(LDFLAGS)
@@ -203,8 +237,8 @@ $(OUT)/x45cd: x45cd/main.c x45cd/hdcd.c x45cd/hdcd.h x45cd/dvd.c x45cd/dvd.h $(A
 	@echo "--- $@"
 	@ls -l $@
 
-$(OUT)/x45web: x45web/main.c x45web/web.h x45web/api_*.c x45web/libsync.c libx45/wifi.c libx45/wifi.h | $(OUT)
-	$(CC) $(CFLAGS) -o $@ x45web/main.c $(wildcard x45web/api_*.c x45web/libsync.c) libx45/wifi.c $(LDFLAGS)
+$(OUT)/x45web: x45web/main.c x45web/web.h x45web/api_*.c x45web/libsync.c libx45/wifi.c libx45/wifi.h libx45/persist.c libx45/persist.h libx45/localnet.h x45web/jpegenc.h | $(OUT)
+	$(CC) $(CFLAGS) -o $@ x45web/main.c $(wildcard x45web/api_*.c x45web/libsync.c) libx45/wifi.c libx45/persist.c $(LDFLAGS)
 	@echo "--- $@"
 	@ls -l $@
 
@@ -241,8 +275,8 @@ $(OUT)/x45wd: x45wd/main.c | $(OUT)
 	@ls -l $@
 
 # WiFi: the client library (talks to wpa_supplicant) and its command line.
-$(OUT)/x45wifi: x45wifi/main.c libx45/wifi.c libx45/wifi.h | $(OUT)
-	$(CC) $(CFLAGS) -o $@ x45wifi/main.c libx45/wifi.c $(LDFLAGS)
+$(OUT)/x45wifi: x45wifi/main.c libx45/wifi.c libx45/wifi.h libx45/persist.c libx45/persist.h | $(OUT)
+	$(CC) $(CFLAGS) -o $@ x45wifi/main.c libx45/wifi.c libx45/persist.c $(LDFLAGS)
 	@echo "--- $@"
 	@ls -l $@
 
@@ -265,4 +299,4 @@ test: $(OUT)/quad_test $(OUT)/font_test $(OUT)/clock_test $(OUT)/mpdc_test $(OUT
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all clean test player clocklib nativetest upnptest
+.PHONY: all clean test player clocklib nativetest upnptest responsivenesstest installertest webtest check

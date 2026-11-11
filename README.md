@@ -112,8 +112,8 @@ see [Quick start](#quick-start).
 - A REST API for everything the panel can do, see [docs/X45-API.md](docs/X45-API.md).
 - File manager in the browser: browse, upload, download, rename, delete, zip, drag and drop. USB and SATA disks are
   mounted read-only and switched to read-write only while you change something. MPD follows the changes.
-- Optional access token for everything that writes. Pages of other web sites cannot use the API (no open CORS, the
-  host name and the origin of a request are checked).
+- No login: the web server answers private-network addresses only. Pages of other web sites cannot use the API (no
+  CORS headers, the host name and the origin of a request are checked).
 - Clock with a sleep timer that fades the volume out, a signal path screen, and a child lock for the keys and the
   remote.
 - A Health tab in the web interface (uptime, load, temperatures, memory, disks, services, logs) and a hardware

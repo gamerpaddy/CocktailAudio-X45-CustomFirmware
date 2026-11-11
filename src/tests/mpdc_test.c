@@ -20,6 +20,7 @@
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <time.h>
 
 static int fails, checks;
 
@@ -29,7 +30,7 @@ static int fails, checks;
 		printf(__VA_ARGS__); printf("\n"); } \
 } while (0)
 
-enum mode { MODE_NORMAL, MODE_BAD_GREETING, MODE_DROP_MID_REPLY, MODE_ONE_COMMAND };
+enum mode { MODE_NORMAL, MODE_BAD_GREETING, MODE_DROP_MID_REPLY, MODE_ONE_COMMAND, MODE_TRICKLE };
 
 static void put(int fd, const char *s)
 {
@@ -61,6 +62,11 @@ static void serve_one(int cfd, enum mode m)
 		have += (size_t)r;
 		while ((nl = memchr(buf, '\n', have))) {
 			*nl = '\0';
+			if (m == MODE_TRICKLE) {
+				int i;
+				for (i = 0; i < 40; i++) { put(cfd, "x"); usleep(100000); }
+				return;
+			}
 			if (m == MODE_DROP_MID_REPLY) {
 				put(cfd, "state: play\nvolume: 4");   /* no newline, no OK */
 				return;
@@ -398,6 +404,21 @@ int main(void)
 	}
 	stop_server(pid);
 
+	/* A peer sending bytes regularly must not extend the total reply deadline. */
+	port = start_server(MODE_TRICKLE, &pid);
+	r = mpdc_open(&c, "127.0.0.1", port);
+	CHECK(r == 0, "open trickle server");
+	if (r == 0) {
+		struct timespec a, b;
+		double elapsed;
+		clock_gettime(CLOCK_MONOTONIC, &a);
+		r = mpdc_cmd(&c, "status");
+		clock_gettime(CLOCK_MONOTONIC, &b);
+		elapsed = b.tv_sec - a.tv_sec + (b.tv_nsec - a.tv_nsec) / 1e9;
+		CHECK(r == -ETIMEDOUT && elapsed < 2.8, "trickle deadline rc=%d time=%.3f", r, elapsed);
+		CHECK(!mpdc_is_open(&c), "timeout closes connection; late replies cannot corrupt next command");
+	}
+	stop_server(pid);
 	/* ------------------------------------------------------ nothing listening --- */
 	r = mpdc_open(&c, "127.0.0.1", 1);   /* port 1: refused */
 	CHECK(r == -ECONNREFUSED, "refused rc %d", r);

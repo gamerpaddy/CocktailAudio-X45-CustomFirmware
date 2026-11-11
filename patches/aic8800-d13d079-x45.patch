@@ -11,3 +11,16 @@
  #endif /* LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0) */
  
  #ifdef CONFIG_RADAR_OR_IR_DETECT
+--- a/rwnx_msg_tx.c
++++ b/rwnx_msg_tx.c
+@@ -765,9 +765,7 @@
+     RWNX_DBG("%s: sta_idx:%d key_idx:%d inst_nbr:%d cipher:%d key_len:%d\n", __func__,
+              key_add_req->sta_idx, key_add_req->key_idx, key_add_req->inst_nbr,
+              key_add_req->cipher_suite, key_add_req->key.length);
+-#if defined(CONFIG_RWNX_DBG) || defined(CONFIG_DYNAMIC_DEBUG)
+-    print_hex_dump_bytes("key: ", DUMP_PREFIX_OFFSET, key_add_req->key.array, key_add_req->key.length);
+-#endif
++/* Never log encryption keys, including debug builds. */
+ 
+     /* Send the MM_KEY_ADD_REQ message to LMAC FW */
+     return rwnx_send_msg(rwnx_hw, key_add_req, 1, MM_KEY_ADD_CFM, cfm);

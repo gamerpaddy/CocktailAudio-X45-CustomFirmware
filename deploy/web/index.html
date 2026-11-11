@@ -50,6 +50,19 @@ ul.list li .acts{display:flex;gap:4px}
 .ok{color:var(--accent)}.bad{color:var(--warn)}
 .favrow{flex-wrap:nowrap}.favrow .fn{flex:0 1 190px;min-width:80px;width:auto}.favrow .fu{flex:1;min-width:120px;width:auto}
 .freq{font-size:44px;font-variant-numeric:tabular-nums;text-align:center;margin:6px 0}
+
+:root{--bg:#101614;--panel:#19221e;--line:#354139;--text:#eff2e8;--dim:#a5b2a9;--accent:#c7dfa5;--btn:#26332a;--warn:#f1ad88}
+body{font:15px/1.6 system-ui,sans-serif;min-height:100vh;padding-bottom:145px;background:radial-gradient(ellipse at top right,#2c3d30,transparent 65%),var(--bg)}header{background:transparent;border:0;padding:24px 32px;gap:20px}header b{font-size:26px;letter-spacing:.18em}#b_pwr{margin-left:auto;background:transparent;font-size:13px}main{grid-template-columns:205px minmax(0,1fr);max-width:1300px;gap:36px;padding:20px 24px 40px}aside h3{font-size:10px;margin:10px 16px 25px}.tabs{flex-direction:column;gap:4px}.tabs button{text-align:left;border:0;background:transparent;color:var(--dim);padding:10px 16px}.tabs button.on{background:#c7dfa518;color:var(--accent);box-shadow:inset 3px 0 var(--accent)}section{padding:28px;border-radius:20px}.content{min-height:440px;box-shadow:0 16px 60px #0002}.big{font-size:clamp(26px,3vw,42px);letter-spacing:-.03em;line-height:1.2;margin:12px 0}.np{align-items:center;gap:30px;margin:12px 0 30px}#art{width:220px;height:220px;border-radius:16px;background:var(--btn)}button{min-height:42px;border-radius:10px;padding:9px 16px}button:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px}button:disabled,input:disabled{opacity:.4;cursor:not-allowed}.row{gap:12px;margin:16px 0}.transport{justify-content:center;margin:28px 0}.primary{background:var(--accent);color:#152018;min-width:125px}.bar{height:6px;margin:22px 0}ul.list{border:0;max-height:60vh}ul.list li{padding:14px 10px;min-height:56px}.kv{row-gap:12px}summary{padding:18px 4px;cursor:pointer;color:var(--dim)}#remote{margin-top:16px}#scr{max-width:650px;margin:16px auto}#volsec{position:fixed;bottom:0;left:0;right:0;z-index:20;background:#19221ef5;backdrop-filter:blur(16px);padding:14px max(24px,calc((100vw - 950px)/2));border-top:1px solid var(--line)}#volume-note{font-size:12px;margin-left:20px}#volsec .row{margin:8px 0}#vol{height:30px;min-width:70px}#vol_v{min-width:48px;text-align:right;font-variant-numeric:tabular-nums}#volume-settings{font-size:12px}
+@media(max-width:760px){main{display:block;padding:0 16px 20px}header{padding:20px}aside h3{display:none}.tabs{flex-direction:row;flex-wrap:nowrap;overflow:auto;padding-bottom:12px}.tabs button{white-space:nowrap;flex:none}section{padding:20px}.np{flex-direction:column;text-align:center;gap:18px}#art{width:180px;height:180px}.np .npt{width:100%}#volume-note{display:block;margin:0;font-size:11px}#volsec{padding:12px 16px}#volume-settings{max-width:95px;line-height:1.2}.kv{grid-template-columns:110px 1fr}}
+
+.skin-picker{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim)}select{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:9px}select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+:root{--wash:#2c3d30;--active:#c7dfa518;--dock:#19221ef5;--primary-ink:#152018}
+:root[data-web-skin="midnight"]{--bg:#0c1120;--panel:#151e32;--line:#30415b;--text:#edf3ff;--dim:#a6b6cf;--accent:#86baff;--btn:#23324b;--warn:#ffac9b;--wash:#27395e;--active:#86baff18;--dock:#151e32f5;--primary-ink:#10203b}
+:root[data-web-skin="paper"]{--bg:#f2efe8;--panel:#fffdf7;--line:#d5cebd;--text:#292e29;--dim:#62695f;--accent:#386848;--btn:#ebe8de;--warn:#aa4429;--wash:#e2e8d9;--active:#38684814;--dock:#fffdf7f5;--primary-ink:#ffffff}
+:root[data-web-skin="amber"]{--bg:#171411;--panel:#24201a;--line:#4d4030;--text:#f6e9d3;--dim:#bdae95;--accent:#efba61;--btn:#352c21;--warn:#ee9071;--wash:#46331b;--active:#efba6118;--dock:#24201af5;--primary-ink:#281b08}
+body{background:radial-gradient(ellipse at top right,var(--wash),transparent 65%),var(--bg)}.tabs button.on{background:var(--active)}#volsec{background:var(--dock)}.primary{color:var(--primary-ink)}
+:root[data-web-skin="amber"] .big{font-family:Georgia,serif;letter-spacing:0}:root[data-web-skin="amber"] section{border-radius:6px}:root[data-web-skin="amber"] button{border-radius:4px}:root[data-web-skin="paper"] .content{box-shadow:0 12px 40px #493f2910}
+@media(max-width:760px){.skin-picker{margin-left:auto}header{gap:12px}.skin-picker select{max-width:135px}}
 </style>
 </head>
 <body>
@@ -57,45 +70,33 @@ ul.list li .acts{display:flex;gap:4px}
   <b>X45</b><span class="pill" id="h_in">-</span>
   <span class="pill warn" id="h_rec" style="display:none"></span>
   <span id="msg"></span>
+  <label class="skin-picker">Web skin <select id="web-skin" aria-label="Web interface skin"><option value="forest">Forest</option><option value="midnight">Midnight</option><option value="paper">Paper</option><option value="amber">Hi-Fi amber</option></select></label>
   <button id="b_pwr" title="Shut the unit down">Power</button>
 </header>
-<main>
-<div>
-  <section>
-    <h3>Panel <label style="float:right;text-transform:none;letter-spacing:0"><input type="checkbox" id="live" checked> live</label></h3>
-    <img id="scr" alt="panel">
-    <div class="pad">
-      <button data-c="key menu">MENU</button><button data-c="ir up">&#9650;</button><button data-c="key input">INPUT</button>
-      <button data-c="ir left">&#9664;</button><button data-c="key ok">OK</button><button data-c="ir right">&#9654;</button>
-      <button data-c="key return">RETURN</button><button data-c="ir down">&#9660;</button><button data-c="key stop">STOP</button>
-    </div>
-    <div class="row"><label>Scroll knob</label><button data-c="knob scroll -1">&#8630; ccw</button><button data-c="knob scroll 1">cw &#8631;</button></div>
-  </section>
-  <section style="margin-top:16px" id="volsec">
-    <h3>Volume</h3>
-    <div class="row"><input type="range" id="vol" min="0" max="100"><span id="vol_v" style="min-width:34px;text-align:right"></span><button id="mute">Mute</button></div>
-  </section>
-</div>
-<div>
-  <section>
-    <div class="tabs" id="tabs"></div>
-    <div id="body"></div>
-  </section>
-</div>
-</main>
+<main><aside><h3>Your listening room</h3><nav class="tabs" id="tabs" aria-label="Navigation"></nav></aside><div class="workspace"><section class="content"><div id="body"></div></section><details id="remote"><summary>Device remote &amp; panel preview</summary><section><label><input type="checkbox" id="live"> Live preview</label><img id="scr" alt="Device panel"><div class="pad"><button data-c="key menu">Menu</button><button data-c="ir up" aria-label="Up">&#9650;</button><button data-c="key input">Sources</button><button data-c="ir left" aria-label="Left">&#9664;</button><button data-c="key ok">OK</button><button data-c="ir right" aria-label="Right">&#9654;</button><button data-c="key return">Back</button><button data-c="ir down" aria-label="Down">&#9660;</button><button data-c="key stop">Stop</button></div></section></details></div></main><footer id="volsec"><strong>Output volume</strong><span id="volume-note" class="dim"></span><div class="row"><button id="mute">Mute</button><input type="range" id="vol" aria-label="Output volume" min="0" max="100" value="0" disabled><output id="vol_v">-</output><button id="volume-settings">Output settings</button></div></footer>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
+const WEB_SKINS = ["forest","midnight","paper","amber"];
+function setWebSkin(value){
+  const skin=WEB_SKINS.includes(value)?value:"forest";
+  document.documentElement.dataset.webSkin=skin;
+  $("web-skin").value=skin;
+  try{localStorage.setItem("x45.webSkin",skin);}catch(e){}
+}
+let savedWebSkin="forest";
+try{savedWebSkin=localStorage.getItem("x45.webSkin")||"forest";}catch(e){}
+setWebSkin(savedWebSkin);
+$("web-skin").onchange=e=>setWebSkin(e.target.value);
 /* tab id, label, panel screen to show (-1 none). Screens: 0 player 1 library 2 radio 3 cd 4 tuner 5 status 6 input 7 options */
-const TABS = [["player","Player",0],["library","Library",1],["favs","Favourites",-1],["cd","CD",3],["tuner","FM / DAB",4],["input","Input",6],["options","Options",7],["status","Status",5]];
+const TABS = [["player","Now playing",0],["library","Library",1],["favs","Favourites",-1],["cd","CD",3],["tuner","FM / DAB",4],["input","Sources",6],["options","Sound & display",7],["status","Status",5]];
 /* Tabs that live in their own file (tabs/NAME.js, loaded at the bottom) register here:
  *   registerTab({id, label, render(): html, wire(el), show(), busy(): bool})
- * They get the helpers of this page: $, esc, list, cmd, put, token. */
+ * They get the helpers of this page: $, esc, list, cmd, put. */
 const MODS = {};
 function registerTab(m){ MODS[m.id] = m; TABS.splice(TABS.length - 1, 0, [m.id, m.label, m.screen == null ? -1 : m.screen]); tabsSig = ""; }
 /* the CD and radio-module tabs only exist while that input is chosen */
 const tabShown = id => id==="cd" ? !!(S && S.input_name==="cd") : id==="tuner" ? !!(S && (S.input_name==="fm" || S.input_name==="dab")) : MODS[id] && MODS[id].shown ? !!MODS[id].shown() : true;
-const TOKEN_KEY = "x45token";
 /* the API names an input with plain words; people read the same labels as on the panel */
 const IN_LABEL = {network:"Network", fm:"FM", "pc usb":"PC USB", "aes ebu":"AES/EBU", coaxial:"Coaxial", optical:"Optical",
                   "line in":"Line in", "aux in":"Aux in", phono:"Phono", cd:"CD", dab:"DAB+", bluetooth:"Bluetooth"};
@@ -103,12 +104,9 @@ const lab = n => IN_LABEL[n] || n;
 let S = null, tab = "player", busy = 0, SYS = null, lastSys = 0;
 const sigs = {};          /* last rendered markup per container: re-render only on change */
 
-function token(){ try { return localStorage.getItem(TOKEN_KEY) || ""; } catch(e){ return ""; } }
 async function cmd(c){
-  const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
   try {
-    const r = await fetch("/api/cmd",{method:"POST",body:c+"\n",headers:h});
-    if(r.status === 401){ const t = prompt("This unit needs an access token:"); if(t){ try{localStorage.setItem(TOKEN_KEY,t);}catch(e){} cmd(c); } return; }
+    await fetch("/api/cmd",{method:"POST",body:c+"\n"});
   } catch(e){}
   setTimeout(poll,150); setTimeout(poll,600);
 }
@@ -123,7 +121,9 @@ function put(el, html){
   const keep = [...el.querySelectorAll("ul.list")].map(u => u.scrollTop);
   const top = document.scrollingElement.scrollTop;
   const ae = document.activeElement, aid = ae && ae.id && el.contains(ae) ? ae.id : null, aval = aid ? ae.value : null;
+  const disclosures = new Map(Array.from(el.querySelectorAll("details[id]"), d => [d.id,d.open]));
   el.innerHTML = html; sigs[el.id] = html;
+  el.querySelectorAll("details[id]").forEach(d => { if(disclosures.has(d.id)) d.open=disclosures.get(d.id); });
   if(aid){ const n = $(aid); if(n){ n.value = aval; n.focus(); } }
   el.querySelectorAll("ul.list").forEach((u,i) => { if(keep[i]) u.scrollTop = keep[i]; });
   document.scrollingElement.scrollTop = top;
@@ -147,7 +147,7 @@ function renderTabs(){
   $("tabs").innerHTML = shown.map(([id,l])=>'<button data-t="'+id+'" class="'+(tab===id?"on":"")+'">'+l+'</button>').join("");
   document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => {
     tab = b.dataset.t; const t = TABS.find(x=>x[0]===tab);
-    if(t[2] >= 0) cmd("screen " + t[2]);
+    if(tab==="library") cmd("screen 1");
     if(tab === "favs") favLoad();
     if(MODS[tab] && MODS[tab].show) MODS[tab].show();
     renderTabs(); sigs.body = null; render();
@@ -155,14 +155,9 @@ function renderTabs(){
 }
 
 function transport(m){
-  return '<div class="row">'+
-   '<button data-c="mpd previous">&#9198;</button><button data-c="ir rew">-10s</button>'+
-   '<button data-c="key ok" class="'+(m.state==="play"?"on":"")+'">'+(m.state==="play"?"&#10074;&#10074; pause":"&#9654; play")+'</button>'+
-   '<button data-c="key stop">&#9632; stop</button><button data-c="ir ffwd">+10s</button><button data-c="mpd next">&#9197;</button></div>'+
-   '<div class="row"><button data-c="mpd random '+(m.random?0:1)+'" class="'+(m.random?"on":"")+'">shuffle</button>'+
-   '<button data-c="mpd repeat '+(m.repeat?0:1)+'" class="'+(m.repeat?"on":"")+'">repeat</button>'+
-   '<button data-c="mpd single '+(m.single?0:1)+'" class="'+(m.single?"on":"")+'">single</button>'+
-   '<button data-c="mpd consume '+(m.consume?0:1)+'" class="'+(m.consume?"on":"")+'">consume</button></div>';
+ return '<div class="row transport"><button data-c="mpd previous" aria-label="Previous track">&#9198;</button><button class="primary" data-c="mpd '+(m.state==='play'?'pause 1':'play')+'">'+(m.state==='play'?'Pause':'Play')+'</button><button data-c="mpd next" aria-label="Next track">&#9197;</button><button data-c="mpd stop">Stop</button></div>'+
+ (m.duration>0?'<div class="row"><button data-c="mpd seekcur -15">-15 seconds</button><button data-c="mpd seekcur +15">+15 seconds</button></div>':'<p class="dim" style="text-align:center">Live stream</p>')+
+ '<details id="playback-options"><summary>Playback options</summary><div class="row"><button data-c="mpd random '+(m.random?0:1)+'" class="'+(m.random?'on':'')+'">Shuffle</button><button data-c="mpd repeat '+(m.repeat?0:1)+'" class="'+(m.repeat?'on':'')+'">Repeat</button><button data-c="mpd single '+(m.single?0:1)+'">'+(m.single?'Play all tracks':'Stop after this track')+'</button><button data-c="mpd consume '+(m.consume?0:1)+'">'+(m.consume?'Keep played tracks':'Remove played tracks from queue')+'</button></div></details>';
 }
 
 /* the file format of CD rips (the unit keeps it); hidden while a rip runs */
@@ -231,11 +226,9 @@ function renderLibrary(){
 }
 async function delPath(p, n){
   if(!confirm('Delete "'+n+'" from the disk?\nThis cannot be undone.')) return;
-  const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
   try {
-    const r = await fetch("/api/library/delete",{method:"POST",body:p,headers:h});
+    const r = await fetch("/api/library/delete",{method:"POST",body:p});
     const t = await r.text();
-    if(r.status===401){ const k=prompt("This unit needs an access token:"); if(k){try{localStorage.setItem(TOKEN_KEY,k);}catch(e){} delPath(p,n);} return; }
     if(!r.ok) alert("Not deleted: "+t);
   } catch(e){ alert("Not deleted: "+e); }
   setTimeout(poll,800); setTimeout(poll,2500);
@@ -315,9 +308,8 @@ async function favLoad(){
 }
 async function favSave(msg){
   const body = FAV.map(f => f.name.replace(/[\t\r\n|]/g," ").trim()+"\t"+f.url.trim()).join("\n")+"\n";
-  const h = {}; if(token()) h["Authorization"] = "Bearer " + token();
   try{
-    const r = await fetch("/api/favourites", {method:"POST", body, headers:h});
+    const r = await fetch("/api/favourites", {method:"POST", body});
     FAVMSG = r.ok ? (msg||"saved") : "could not save: "+(await r.text());
   }catch(e){ FAVMSG = "could not save"; }
   sigs.body = null; render();
@@ -428,9 +420,9 @@ function render(){
   $("h_in").textContent=lab(S.input_name); $("msg").textContent=S.status||"";
   const r=$("h_rec"); r.style.display=S.rec.active?"":"none";
   r.textContent=S.rec.cd?("RIP "+S.rec.track+"/"+S.rec.tracks):("REC "+fmt(S.rec.secs));
-  $("volsec").style.display = S.volume_hidden ? "none" : "";
+  $("volsec").style.display=""; $("vol").disabled=!!S.volume_hidden; $("volume-note").textContent=S.volume_hidden?"Fixed output: use your amplifier, or change output settings.":"";
   if(!busy) $("vol").value=S.volume;
-  $("vol_v").textContent=S.volume; $("mute").className=S.muted?"on":"";
+  if(!busy) $("vol_v").textContent=S.volume_hidden?"Fixed":S.volume+"%"; $("mute").className=S.muted?"on":"";
   const b=$("body");
   let html="", fn=null;
   if(tab==="player") html=renderPlayer();
@@ -495,7 +487,7 @@ async function poll(){
 
 (function(){
   const el=$("vol");
-  el.onpointerdown=()=>busy=1;
+  el.onpointerdown=()=>busy=1;el.onpointerup=el.onpointercancel=el.onblur=()=>setTimeout(()=>busy=0,800);
   el.oninput=()=>{busy=1;$("vol_v").textContent=el.value;clearTimeout(el._t);el._t=setTimeout(()=>{cmd("vol "+el.value);setTimeout(()=>busy=0,800);},120);};
 })();
 $("mute").onclick=()=>cmd("key mute");
@@ -503,11 +495,13 @@ $("b_pwr").onclick=()=>{ if(confirm("Shut the unit down?")){ cmd("key power"); s
 /* the panel is a motion JPEG stream while the page is in view and "live" is ticked; otherwise one still picture */
 let shownMode = "";
 function shot(){
-  const want = $("live").checked && !document.hidden ? "stream" : "still";
+  if(!$("remote").open || document.hidden){$("scr").removeAttribute("src");shownMode="";return;}
+  const want=$("live").checked?"stream":"still";
   if(want === shownMode) return;
   shownMode = want;
   $("scr").src = (want === "stream" ? "/api/stream.mjpg?" : "/api/screen.bmp?") + Date.now();
 }
+$("remote").ontoggle=shot; $("volume-settings").onclick=()=>{tab="options";tabsSig="";sigs.body=null;render();};
 $("live").onchange = shot; document.addEventListener("visibilitychange", ()=>{ shot(); poll(); });
 /* the stream ends on its own (the unit caps it at 6 h, the web server is restarted): ask again */
 $("scr").onerror = ()=>{ if(shownMode==="stream") setTimeout(()=>{ shownMode=""; shot(); }, 3000); };

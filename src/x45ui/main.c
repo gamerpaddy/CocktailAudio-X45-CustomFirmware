@@ -32,6 +32,7 @@
  */
 #define _GNU_SOURCE
 #include "ui.h"
+#include "../libx45/persist.h"
 #include "ext/ext.h"
 #include "skins/skin.h"
 #include "vis/vis.h"
@@ -932,9 +933,30 @@ static void draw_header(struct ui *u)
 
 /* the sound is going to a Bluetooth device: its level is the software mixer of that output, and the knob moves it
  * even while the line outputs are fixed */
+/* Inputs whose sound can be sent to the Bluetooth device: the network (MPD's own FIFO output) and those heard in
+ * hardware, which x45loop reads from the SSI capture and converts (the radio module, the analogue and digital inputs,
+ * PC USB, the CD, AirPlay and Spotify) */
+static int bt_hw_src(const struct ui *u)
+{
+	return tuner_input(u) || meter_wanted(u) || u->input == X45_IN_PCUSB || u->input == UI_IN_CD ||
+	       (u->input == X45_IN_NETWORK && u->air);   /* AirPlay and Spotify play to the DAC themselves, not through MPD */
+}
+
+static int bt_carries(const struct ui *u)
+{
+	return u->input == X45_IN_NETWORK || bt_hw_src(u);
+}
+
+/* The capture of a hardware input feeds the Bluetooth sender whenever the output is on (not only once a headset is
+ * connected): starting it takes a second or two (rate measurement), which was heard as a stutter at the connection */
+static int bt_feed(void)
+{
+	return ui_btout_routed() || ui_btout_busy();
+}
+
 static int bt_volume(const struct ui *u)
 {
-	return ui_btout_routed() && u->input == X45_IN_NETWORK;
+	return ui_btout_routed() && bt_carries(u);
 }
 
 static int vol_relevant(const struct ui *u)
@@ -1129,6 +1151,7 @@ static void draw_volume_overlay(struct ui *u)
 #define METER_FILE "/tmp/x45meter.json"
 #define METER_WANT "/tmp/x45meter.want"   /* x45web touches it while a browser shows a meter */
 #define METER_FIFO "/tmp/x45mpd.fifo"
+#define BT_PCM     "/tmp/x45btout.pcm"   /* the Bluetooth output's FIFO (x45btsrc reads it) */
 
 #define METER_DECAY   30.0f  /* dB per second, bars and peak marker alike */
 #define SIGNAL_DB    -55.0f  /* above this counts as "there is a signal" */
@@ -1191,7 +1214,10 @@ static void meter_start(struct ui *u)
 		/* analogue sources are heard in hardware; x45loop only reads the
 		 * SSI capture on hw:1,0 for the meter, like the stock firmware */
 		if (u->input >= X45_IN_AES_EBU && u->input <= X45_IN_PHONO) {
-			execl("/home/root/x45new/bin/x45loop", "x45loop", "-s", METER_FILE, (char *)NULL);
+			if (bt_feed())
+				execl("/home/root/x45new/bin/x45loop", "x45loop", "-s", METER_FILE, "-o", BT_PCM, (char *)NULL);
+			else
+				execl("/home/root/x45new/bin/x45loop", "x45loop", "-s", METER_FILE, (char *)NULL);
 			_exit(127);
 		}
 		execlp("arecord", "arecord", "-q", "-D", "hw:1,0", "-t", "raw",
@@ -1203,6 +1229,7 @@ static void meter_start(struct ui *u)
 	fcntl(p[0], F_SETFL, O_NONBLOCK);
 	fcntl(p[0], F_SETFD, FD_CLOEXEC);
 	u->m_pid = pid;
+	u->m_bt = bt_feed();
 	u->m_fd = p[0];
 	u->m_last = now_ms();
 	u->m_lvl[0] = u->m_lvl[1] = u->m_pk[0] = u->m_pk[1] = -90.0f;
@@ -1226,6 +1253,10 @@ static void meter_poll(struct ui *u)
 	if (!u->m_pid) {
 		if (ms_due(now, u->m_retry))
 			meter_start(u);
+		return;
+	}
+	if (u->m_bt != bt_feed()) {   /* the sound starts or stops going to the Bluetooth device: the capture is started with or without -o */
+		meter_stop(u);
 		return;
 	}
 	if (waitpid(u->m_pid, NULL, WNOHANG) == u->m_pid) { /* arecord died */
@@ -3197,8 +3228,7 @@ static void *mpd_thread(void *arg)
 			usleep(200000);
 			continue;
 		}
-		if (u->p_refresh) {
-			u->p_refresh = 0;
+		if (atomic_exchange(&u->p_refresh, 0)) {
 			last_song_t = 0;   /* read the song again whatever the position says */
 		}
 		if (st.song != last_pos || strcmp(st.state, last_state) || ms_age(now, last_song_t) >= 2000) {
@@ -3999,8 +4029,9 @@ static void spec_poll(struct ui *u)
 	struct stat st;
 	/* a browser asks, or the panel's own player screen is up */
 	int want = (stat(METER_WANT, &st) == 0 && time(NULL) - st.st_mtime < 6) ||
-		   (u->screen == SCR_PLAYER && u->rec_pid <= 0 && vis_get(u));
-	int mode = 0;
+		   (u->screen == SCR_PLAYER && u->rec_pid <= 0 && vis_get(u)) ||
+		   (bt_feed() && bt_hw_src(u));   /* the capture is what the Bluetooth device hears */
+	int mode = 0, bt;
 	unsigned rate = 0;
 	pid_t pid;
 
@@ -4018,10 +4049,11 @@ static void spec_poll(struct ui *u)
 		u->sp_why = u->m_pid > 0 ? "" : "capture not running";
 		return;
 	}
+	bt = bt_feed() && bt_hw_src(u);
 	if (tuner_input(u)) {
 		mode = 1;
 		rate = 44100;
-	} else if (u->input == X45_IN_NETWORK && (u->sp_fails >= 2 || ui_btout_routed())) {
+	} else if (u->input == X45_IN_NETWORK && !u->air && (u->sp_fails >= 2 || ui_btout_routed())) {
 		/* the SSI capture is dead, or the sound goes to a Bluetooth device and never reaches the DAC: MPD can still hand
 		 * its own samples to the analyzer (while it plays) */
 		if (u->st.audio[0] >= '0' && u->st.audio[0] <= '9' && atoi(u->st.audio) >= 8000) {
@@ -4054,7 +4086,7 @@ static void spec_poll(struct ui *u)
 			u->sp_pid = 0;
 			u->sp_retry = now_ms() + 2000;   /* the capture died: do not respawn at once */
 			spec_stop(u);                    /* only the bookkeeping is left to clear */
-		} else if (mode != u->sp_mode || rate != u->sp_rate) {
+		} else if (mode != u->sp_mode || rate != u->sp_rate || u->sp_bt != bt) {
 			spec_stop(u);
 		} else if (u->sp_mode == 3 && !u->sp_ok && time(NULL) - u->sp_spawn > 6) {
 			/* a capture that has written nothing after six seconds is waiting for clocks that will not come */
@@ -4094,13 +4126,18 @@ static void spec_poll(struct ui *u)
 		snprintf(r, sizeof r, "%u", rate);
 		if (mode == 2)
 			execl("/home/root/x45new/bin/x45loop", "x45loop", "-r", r, "-f", METER_FIFO, "-s", METER_FILE, (char *)NULL);
+		else if (mode == 3 && bt)
+			execl("/home/root/x45new/bin/x45loop", "x45loop", "-s", METER_FILE, "-o", BT_PCM, (char *)NULL);
 		else if (mode == 3)
 			execl("/home/root/x45new/bin/x45loop", "x45loop", "-s", METER_FILE, (char *)NULL);
+		else if (bt)
+			execl("/home/root/x45new/bin/x45loop", "x45loop", "-r", r, "-b", "16", "-s", METER_FILE, "-o", BT_PCM, (char *)NULL);
 		else
 			execl("/home/root/x45new/bin/x45loop", "x45loop", "-r", r, "-b", "16", "-s", METER_FILE, (char *)NULL);
 		_exit(127);
 	}
 	u->sp_pid = pid;
+	u->sp_bt = bt;
 	u->sp_mode = mode;
 	u->sp_rate = rate;
 	u->sp_spawn = time(NULL) - 1;
@@ -5309,7 +5346,7 @@ static struct mpdc_entry *lib_add_disks(struct mpdc_entry *rows, int *n)
  * pointer into u->rows, and both are about to be overwritten. On failure the
  * listing is emptied and the reason shown; u->dir keeps its old value so
  * RETURN still climbs out of wherever we were. */
-static void browse_load(struct ui *u, const char *path, const char *select_path)
+static void browse_load_sync(struct ui *u, const char *path, const char *select_path)
 {
 	char want[MPDC_PATH_MAX], pick[MPDC_PATH_MAX];
 	struct mpdc_entry *rows = NULL;
@@ -5428,6 +5465,86 @@ static void browse_load(struct ui *u, const char *path, const char *select_path)
 	u->dirty = 1;
 }
 
+/* One in-flight MPD listing; navigation replaces the pending request. Results
+ * are only adopted on the main thread, and stale results are discarded. */
+static struct {
+    pthread_t thread;
+    atomic_int done;
+    int active, pending, port;
+    unsigned generation, running_generation;
+    char path[MPDC_PATH_MAX], pick[MPDC_PATH_MAX];
+    char work_path[MPDC_PATH_MAX], work_pick[MPDC_PATH_MAX];
+    struct ui *result;
+} browse_job;
+
+static void *browse_worker(void *unused)
+{
+    struct ui *v = calloc(1, sizeof *v);
+    (void)unused;
+    if (v) {
+        v->mpd.fd = -1;
+        snprintf(v->dir, sizeof v->dir, "%s", browse_job.work_path);
+        mpdc_open(&v->mpd, MPDC_DEFAULT_HOST, browse_job.port);
+        browse_load_sync(v, browse_job.work_path, browse_job.work_pick);
+        mpdc_close(&v->mpd);
+    }
+    browse_job.result = v;
+    atomic_store(&browse_job.done, 1);
+    return NULL;
+}
+
+static void browse_job_poll(struct ui *u)
+{
+    if (browse_job.active && atomic_load(&browse_job.done)) {
+        struct ui *v;
+        pthread_join(browse_job.thread, NULL);
+        browse_job.active = 0;
+        v = browse_job.result;
+        if (browse_job.running_generation == browse_job.generation) {
+            if (v) {
+                free(u->rows);
+                u->rows = v->rows; v->rows = NULL;
+                u->nrows = v->nrows; u->truncated = v->truncated;
+                u->bsel = v->bsel; u->top = v->top;
+                snprintf(u->dir, sizeof u->dir, "%s", v->dir);
+                snprintf(u->dir_err, sizeof u->dir_err, "%s", v->dir_err);
+            } else snprintf(u->dir_err, sizeof u->dir_err, "out of memory");
+            u->dirty = 1;
+        }
+        if (v) { free(v->rows); free(v); }
+        browse_job.result = NULL;
+    }
+    if (!browse_job.active && browse_job.pending) {
+        browse_job.pending = 0;
+        browse_job.port = u->mpd_port;
+        snprintf(browse_job.work_path, sizeof browse_job.work_path, "%s", browse_job.path);
+        snprintf(browse_job.work_pick, sizeof browse_job.work_pick, "%s", browse_job.pick);
+        browse_job.running_generation = browse_job.generation;
+        atomic_store(&browse_job.done, 0);
+        if (pthread_create(&browse_job.thread, NULL, browse_worker, NULL) == 0)
+            browse_job.active = 1;
+        else { snprintf(u->dir_err, sizeof u->dir_err, "could not start library worker"); u->dirty = 1; }
+    }
+}
+
+static void browse_load(struct ui *u, const char *path, const char *select_path)
+{
+    char want[MPDC_PATH_MAX], pick[MPDC_PATH_MAX];
+    snprintf(want, sizeof want, "%s", path);
+    snprintf(pick, sizeof pick, "%s", select_path ? select_path : "");
+    browse_job.generation++;
+    browse_job.pending = 0;
+    if (want[0] == '@') { browse_load_sync(u, want, pick); return; }
+    snprintf(browse_job.path, sizeof browse_job.path, "%s", want);
+    snprintf(browse_job.pick, sizeof browse_job.pick, "%s", pick);
+    browse_job.pending = 1;
+    free(u->rows); u->rows = NULL; u->nrows = u->truncated = u->bsel = u->top = 0;
+    snprintf(u->dir, sizeof u->dir, "%s", want);
+    snprintf(u->dir_err, sizeof u->dir_err, "Loading...");
+    u->dirty = 1;
+    browse_job_poll(u);
+}
+
 /* The library changed under the list (an update finished, or files came in through the file manager): load the
  * folder again, with the cursor on the row it was on. Folders of the network and the radio list are not MPD's. */
 static void lib_refresh(struct ui *u)
@@ -5503,6 +5620,7 @@ static void radio_play(struct ui *u, const char *url, const char *name);
 
 static void browse_play(struct ui *u)
 {
+	if (u->bsel < 0 || u->bsel >= u->nrows) return;
 	char q[2 * MPDC_PATH_MAX + 8], cmd[2 * MPDC_PATH_MAX + 24];
 
 	if (u->bsel >= 0 && u->bsel < u->nrows && !strncmp(u->rows[u->bsel].path, "@s|", 3)) {
@@ -6015,67 +6133,12 @@ static void skip_track(struct ui *u, int dir)
  * the change simply lasts until the next start. */
 void save_config_key(const char *key, const char *val)
 {
-	static char buf[16384];
-	char line[1100], tmp[] = CONF_PATH ".tmp";
-	size_t n = 0, kl = strlen(key);
-	int done = 0, w;
-	FILE *f;
-
-	/* a value that does not fit a line would lose its newline and run into the next setting */
-	if (strlen(key) + strlen(val) + 4 > sizeof line)
-		return;
-	if (val[strcspn(val, "\r\n")]) {   /* a line break would start another setting */
-		char *cut = strdup(val);
-
-		if (!cut)
-			return;
-		cut[strcspn(cut, "\r\n")] = '\0';
-		save_config_key(key, cut);
-		free(cut);
-		return;
-	}
-	f = fopen(CONF_PATH, "r");
-	if (f) {
-		while (fgets(line, sizeof line, f)) {
-			const char *k = line;
-			int hit;
-
-			while (*k == ' ' || *k == '\t')
-				k++;
-			hit = !strncmp(k, key, kl) &&
-			      (k[kl] == ' ' || k[kl] == '\t' || k[kl] == '=');
-			if (hit) {
-				if (done)
-					continue;
-				snprintf(line, sizeof line, "%s = %s\n", key, val);
-				done = 1;
-			}
-			if (n + strlen(line) >= sizeof buf) {   /* never write half of a file */
-				fclose(f);
-				return;
-			}
-			memcpy(buf + n, line, strlen(line));
-			n += strlen(line);
-		}
-		fclose(f);
-	}
-	if (!done) {
-		w = snprintf(line, sizeof line, "%s = %s\n", key, val);
-
-		if (n + (size_t)w + 1 >= sizeof buf)
-			return;
-		if (n && buf[n - 1] != '\n')   /* a file that ends without a newline: the setting would join its last line */
-			buf[n++] = '\n';
-		memcpy(buf + n, line, (size_t)w);
-		n += (size_t)w;
-	}
-	f = fopen(tmp, "w");
-	if (!f)
-		return;
-	if (fwrite(buf, 1, n, f) == n && fclose(f) == 0)
-		rename(tmp, CONF_PATH);
-	else
-		unlink(tmp);
+	char clean[1100];
+	if (strlen(key) + strlen(val) + 4 >= sizeof clean) return;
+	snprintf(clean, sizeof clean, "%s", val);
+	clean[strcspn(clean, "\r\n")] = 0;
+	if (x45_config_set(CONF_PATH, key, clean) != 0)
+		fprintf(stderr, "x45ui: could not save setting %s\n", key);
 }
 
 static void load_config(struct ui *u, const char *path)
@@ -6527,7 +6590,7 @@ static void station_save(struct ui *u)
 	char clean[136], *shown;
 	FILE *f;
 	struct stat sb;
-	int i;
+	int i, lock;
 
 	radio_load(u);
 	for (i = 0; i < u->nstations; i++)
@@ -6551,8 +6614,10 @@ static void station_save(struct ui *u)
 		shown++;
 	if (!*shown)
 		shown = "Stream";
+	lock = x45_file_lock(u->stations_path);   /* the web page and the router sync write this file too */
 	f = fopen(u->stations_path, "a+");
 	if (!f) {
+		x45_file_unlock(lock);
 		say(u, "cannot write the station list");
 		return;
 	}
@@ -6565,6 +6630,7 @@ static void station_save(struct ui *u)
 	}
 	fprintf(f, "%s | %s\n", shown, u->song.file);
 	fclose(f);
+	x45_file_unlock(lock);
 	radio_load(u);
 	say(u, "saved: %s", shown);
 }
@@ -6824,8 +6890,19 @@ static int lib_delete_do(const char *rel, const char **why)
 	return 0;
 }
 
-/* Takes the entry with this URL out of the station file (the part the FRITZ!Box sync does not manage). */
+static int fav_remove_locked(struct ui *u, const char *url, const char **why);
+
+/* Takes the entry with this URL out of the station file (the part the FRITZ!Box sync does not manage). Under the
+ * station file's lock: the web page and the router sync rewrite the file too. */
 static int fav_remove(struct ui *u, const char *url, const char **why)
+{
+	int lock = x45_file_lock(u->stations_path), r = fav_remove_locked(u, url, why);
+
+	x45_file_unlock(lock);
+	return r;
+}
+
+static int fav_remove_locked(struct ui *u, const char *url, const char **why)
 {
 	FILE *f = fopen(u->stations_path, "r");
 	char tmp[320], line[1200];
@@ -7775,16 +7852,38 @@ static void menu_hold_poll(struct ui *u)
 }
 
 /* the disc comes out (slot drive, no tray); one that plays is stopped first */
+static pid_t eject_pid;
+static long eject_started;
+static void cd_eject_poll(struct ui *u)
+{
+    int status;
+    pid_t r;
+    if (!eject_pid) return;
+    r = waitpid(eject_pid, &status, WNOHANG);
+    if (!r && ms_age(now_ms(), eject_started) > 15000) {
+        kill(eject_pid, SIGKILL);
+        say(u, "eject timed out");
+        return; /* reap without blocking on the next frame */
+    }
+    if (r == eject_pid || (r < 0 && errno == ECHILD)) {
+        say(u, r == eject_pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? "disc ejected" : "eject failed");
+        eject_pid = 0;
+        u->cd_ntracks = 0;
+        u->dirty = 1;
+    }
+}
 static void cd_eject(struct ui *u)
 {
-	if (cd_active(u))
-		cd_stop(u);
-	if (system(X45CD " eject") == 0)
-		say(u, "disc ejected");
-	else
-		say(u, "eject failed");
-	u->cd_ntracks = 0;
-	u->dirty = 1;
+    if (eject_pid) return;
+    if (cd_active(u)) cd_stop(u);
+    eject_pid = fork();
+    if (eject_pid == 0) {
+        execl(X45CD, X45CD, "eject", (char *)NULL);
+        _exit(127);
+    }
+    if (eject_pid < 0) { eject_pid = 0; say(u, "cannot start eject"); }
+    else { eject_started = now_ms(); say(u, "ejecting disc..."); }
+    u->dirty = 1;
 }
 
 /* ---- services for ext/clock.c ---- */
@@ -8352,7 +8451,7 @@ static void web_command(struct ui *u, char *line)
 			} else if (!strcmp(verb, "add")) {
 				FILE *sf;
 				struct stat sb;
-				int dup = 0;
+				int dup = 0, slock = -1;
 
 				radio_load(u);
 				for (i = 0; i < (size_t)u->nstations; i++)
@@ -8362,7 +8461,7 @@ static void web_command(struct ui *u, char *line)
 					say(u, "already in the station list");
 				} else if (stat(u->stations_path, &sb) == 0 && sb.st_size > 200 * 1024) {
 					say(u, "the station list is full");   /* it is not read above 256 KB: everything would vanish */
-				} else if ((sf = fopen(u->stations_path, "a+"))) {
+				} else if ((slock = x45_file_lock(u->stations_path)), (sf = fopen(u->stations_path, "a+"))) {
 					if (fseek(sf, -1, SEEK_END) == 0) {   /* a hand-edited file may end without a newline */
 						int last = fgetc(sf);
 
@@ -8372,8 +8471,11 @@ static void web_command(struct ui *u, char *line)
 					}
 					fprintf(sf, "%s | %s\n", name, url);
 					fclose(sf);
+					x45_file_unlock(slock);
 					radio_load(u);
 					say(u, "station added");
+				} else {
+					x45_file_unlock(slock);   /* (the file could not be opened) */
 				}
 			} else if (!strcmp(verb, "play")) {
 				if (u->input != X45_IN_NETWORK)
@@ -8399,10 +8501,7 @@ static void web_command(struct ui *u, char *line)
 		ui_btout_web(u, b);
 	} else if (!strcmp(a, "cd")) {
 		if (!strcmp(b, "eject") && u->input == UI_IN_CD) {
-			cd_stop(u);
-			if (system(X45CD " eject") == 0)
-				say(u, "disc ejected");
-			u->cd_ntracks = 0;
+			cd_eject(u);
 		}
 	} else {
 		ui_ext_cmd(u, a, b);   /* a screen of ext/ that is called by that name (clock, songlog ...) */
@@ -8417,14 +8516,12 @@ static void web_poll(struct ui *u)
 	char line[1200];
 	FILE *f;
 
-	if (rename(WEB_CMD, WEB_CMD ".run") == 0) {
-		f = fopen(WEB_CMD ".run", "r");
+	if ((f = x45_queue_take(WEB_CMD)) != NULL) {
 		if (f) {
 			while (fgets(line, sizeof line, f))
 				web_command(u, line);
 			fclose(f);
 		}
-		unlink(WEB_CMD ".run");
 		last_state = 0;
 	}
 	if (!u->dirty && ms_age(now, last_state) < 1000)
@@ -8610,6 +8707,9 @@ int main(int argc, char **argv)
 	int x20pid = 0;
 
 	memset(&u, 0, sizeof u);
+	atomic_init(&u.p_stop, 0);
+	atomic_init(&u.p_refresh, 0);
+	atomic_init(&u.settle_until, 0);
 	u.mpd_port = MPDC_DEFAULT_PORT;
 	{
 		int j;
@@ -8837,9 +8937,10 @@ int main(int argc, char **argv)
 			STAGE("stream_watch", stream_watch(&u));
 			STAGE("meter_poll", meter_poll(&u));
 			STAGE("cd_poll", cd_poll(&u));
+			cd_eject_poll(&u);
 			STAGE("bt_poll", bt_poll(&u));
 			{   /* what is played from the network goes to the Bluetooth device alone: the main output stays silent */
-				int hold = ui_btout_routed() && u.input == X45_IN_NETWORK;
+				int hold = ui_btout_routed() && bt_carries(&u);
 
 				if (hold != bt_hw_mute) {
 					bt_hw_mute = hold;
@@ -8865,6 +8966,7 @@ int main(int argc, char **argv)
 			rec_note_poll(&u);
 			settle_poll(&u);
 			pcusb_clock_poll(&u);
+			browse_job_poll(&u);
 			lib_poll(&u);
 			if (u.vol_dirty && now_ms() - u.last_vol_change > 2000) {
 				char v[16];
@@ -8924,6 +9026,17 @@ int main(int argc, char **argv)
 		}
 	}
 
+	browse_job.pending = 0;
+	if (browse_job.active) {
+		pthread_join(browse_job.thread, NULL);
+		if (browse_job.result) { free(browse_job.result->rows); free(browse_job.result); }
+	}
+	if (eject_pid) kill(eject_pid, SIGTERM);
+	if (u.p_started) {
+		atomic_store(&u.p_stop, 1);
+		pthread_join(u.p_thr, NULL);
+		pthread_mutex_destroy(&u.p_mx);
+	}
 	/* hand the panel back exactly as we found it */
 	if (x45_gfx_restore(&u.g, SAVED_FRAME) < 0)
 		fprintf(stderr, "x45ui: warning: could not restore the frame\n");

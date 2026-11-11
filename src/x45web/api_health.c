@@ -10,8 +10,7 @@
  *   GET /api/logs/NAME     the last 300 lines of the log, as text; NAME.1 and NAME.2 are the logs of the runs before
  *   GET /api/logs/NAME/N   the last N lines (1..2000)
  *
- * The names are a fixed list (no path comes from the request). With a web_token set the logs need it too (main.c).
- */
+ * The names are a fixed list (no path comes from the request). */
 #include "web.h"
 
 #include <dirent.h>
@@ -28,7 +27,7 @@
 static const struct { const char *name, *file; } LOGS[] = {
 	{ "stack", "x45stack.log" }, { "ui", "x45ui.log" }, { "web", "x45web.log" }, { "wd", "x45wd.log" },
 	{ "crashes", "crashes.log" }, { "boots", "boots.log" }, { "mpd", "mpd/log" }, { "upnp", "upmpdcli.out" },
-	{ "airplay", "shairport.log" }, { "spotify", "librespot.log" },
+	{ "airplay", "shairport.log" }, { "spotify", "librespot.log" }, { "diag", "diag.log" },
 };
 #define NLOGS ((int)(sizeof LOGS / sizeof *LOGS))
 
@@ -435,7 +434,7 @@ static void get_log(int fd, const char *spec)
 			lines = 300;
 	}
 	if (!strcmp(name, "kernel")) {
-		FILE *p = popen("dmesg 2>/dev/null | tail -n 400", "r");
+		FILE *p = popen("dmesg 2>/dev/null | grep -v 'key: ' | tail -n 400", "r");
 		static char kb[65536];
 		size_t n;
 

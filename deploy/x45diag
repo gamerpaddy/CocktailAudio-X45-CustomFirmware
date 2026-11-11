@@ -1,0 +1,84 @@
+#!/bin/sh
+# Diagnostic logger, started by x45stack. Writes only when something happens, to $LOG (kept small):
+#  - Bluetooth output: the sender's underrun/slip counters rose fast while streaming. The line also names any
+#    process other than MPD and x45btsrc that has the audio FIFO open (a stray reader steals the sound).
+#  - DAB/FM module: an x45tuner process appearing or ending, and what it said (start-up time, resets).
+ROOT=/home/root/x45new
+LOG=$ROOT/diag.log
+BTST=/tmp/x45btout.status
+TULOG=/tmp/x45tuner.log
+PCM=/tmp/x45btout.pcm
+
+say() {
+	echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> $LOG
+	if [ "$(wc -c < $LOG)" -gt 131072 ]; then
+		tail -c 65536 $LOG > $LOG.t && cat $LOG.t > $LOG
+		rm -f $LOG.t
+	fi
+}
+
+val() {	# key file
+	sed -n "s/^$1=//p" "$2" 2>/dev/null | head -n 1
+}
+
+fifo_holders() {
+	for f in /proc/[0-9]*/fd/*; do
+		[ "$(readlink $f 2>/dev/null)" = "$PCM" ] || continue
+		p=${f%/fd/*}
+		c=$(cat $p/comm 2>/dev/null)
+		case "$c" in mpd|x45btsrc) ;; *) printf '%s(%s) ' "$c" "${p#/proc/}" ;; esac
+	done
+}
+
+say "x45diag started"
+lastu=-1
+lasttp=
+tulines=0
+lastin=
+lastmpd=
+lastair=
+tick=0
+while true; do
+	sleep 1
+	# ---- what the panel is doing: input, MPD state and song, AirPlay/Spotify marker (every second)
+	in=$(sed -n 's/^input = //p' $ROOT/etc/x45ui.conf 2>/dev/null | head -n 1)
+	[ "$in" != "$lastin" ] && { say "input: $lastin -> $in"; lastin=$in; }
+	air=0; [ -f /tmp/x45-airplay-active ] && air=1
+	[ "$air" != "$lastair" ] && { say "airplay/spotify session: $air"; lastair=$air; }
+	m=$( ( [ -n "$MPD_PASSWORD" ] && echo "password \"$MPD_PASSWORD\""; echo status; echo close; sleep 0.2) | nc 127.0.0.1 6600 2>/dev/null | sed -n 's/^state: //p;s/^songid: /song=/p' | tr -d '\r' | tr '\n' ' ')
+	[ "$m" != "$lastmpd" ] && { say "mpd: $m"; lastmpd=$m; }
+	tick=$((tick + 1))
+	[ $tick -lt 5 ] && continue
+	tick=0
+	# ---- Bluetooth sender
+	if [ -f $BTST ] && [ "$(val streaming $BTST)" = 1 ]; then
+		u=$(val underruns $BTST)
+		[ -n "$u" ] || u=0
+		if [ $lastu -ge 0 ] && [ $((u - lastu)) -ge 100 ]; then
+			say "bt: underruns +$((u - lastu)) (total $u) slips=$(val slips $BTST) queued_ms=$(val queued_ms $BTST) load=$(cut -d' ' -f1 /proc/loadavg) strays=[$(fifo_holders)]"
+		fi
+		lastu=$u
+	else
+		lastu=-1
+	fi
+	# ---- DAB/FM module
+	tp=$(pidof x45tuner)
+	if [ "$tp" != "$lasttp" ]; then
+		if [ -n "$tp" ]; then
+			say "tuner: process $tp started ($(tr '\0' ' ' < /proc/${tp%% *}/cmdline 2>/dev/null))"
+		else
+			say "tuner: process $lasttp ended"
+		fi
+		lasttp=$tp
+	fi
+	if [ -f $TULOG ]; then
+		n=$(wc -l < $TULOG)
+		[ $n -lt $tulines ] && tulines=0
+		if [ $n -gt $tulines ]; then
+			sed -n "$((tulines + 1)),${n}p" $TULOG | grep -E "answered|no answer|absent|stalled" | while read -r l; do
+				say "tuner: $l"
+			done
+			tulines=$n
+		fi
+	fi
+done

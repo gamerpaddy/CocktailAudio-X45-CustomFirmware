@@ -17,6 +17,7 @@
 #include "vis/mem.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -91,7 +92,8 @@ struct ui {
 	 * keeps it from answering for seconds) the panel keeps running on the last state it was given */
 	pthread_t p_thr;
 	pthread_mutex_t p_mx;
-	int p_started, p_alive, p_valid, p_stop;
+	int p_started, p_alive, p_valid;
+	atomic_int p_stop;
 	struct { char url[MPDC_PATH_MAX]; char name[96]; } *ctx;   /* the stations of the folder the playing one came from */
 	int ctx_n;
 	char play_url[512], play_name[96];   /* the station chosen last: MPD has no name for it until the stream connects */
@@ -101,7 +103,7 @@ struct ui {
 	double sw_el;           /* the elapsed time seen last (-1: not yet) */
 	long sw_t, sw_retry_t;  /* when the elapsed time last moved / when the stream was last restarted */
 	char sw_url[512];       /* what to start again */
-	volatile int p_refresh;   /* the owner just changed what plays: the poller reads the song again at once */
+	atomic_int p_refresh;   /* the owner just changed what plays: the poller reads the song again at once */
 	long song_hold;           /* until then the snapshots are older than that change: ignored */
 	unsigned p_seq, p_seen;
 	struct mpdc_status p_st;
@@ -134,7 +136,7 @@ struct ui {
 	long ir_step;           /* when a held list key last moved the cursor */
 	int ir_bounce;          /* the press being handled repeats the previous one of the same button too soon */
 	/* the output is muted in hardware while a stream starts and its clock settles (settle_* in main.c) */
-	volatile long settle_until;   /* mute until then, 0 when not */
+	atomic_long settle_until;   /* mute until then, 0 when not */
 	long settle_t0;               /* when it began */
 	int settle_open;              /* the stream is up: settle_until is the end of the half second after it */
 	int quit_code;          /* process exit status: 3 = shut the unit down */
@@ -169,6 +171,7 @@ struct ui {
 
 	/* analyzer feed for the web meters when the panel meter is not running */
 	pid_t sp_pid;
+	int sp_bt;              /* the radio capture was started with -o */
 	int sp_mode;            /* 0 none, 1 radio capture, 2 MPD fifo (network), 3 the SSI capture at 192 kHz */
 	unsigned sp_rate;
 	long sp_retry;
@@ -203,6 +206,7 @@ struct ui {
 
 	/* level meter for the external inputs (capture via arecord on hw:1,0) */
 	pid_t m_pid;
+	int m_bt;               /* the meter capture was started with -o (its sound goes to the Bluetooth device) */
 	int m_fd;
 	long m_retry, m_last, m_sig_t, m_clip_t, m_pk_t[2];
 	float m_lvl[2], m_pk[2];     /* dBFS */
